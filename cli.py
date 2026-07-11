@@ -38,6 +38,7 @@ class TimelineChoice:
     page_id: str
     author_id: str
     author_acct: str
+    author_profile_url: str
     author_is_known_followed: bool = False
 
 
@@ -478,6 +479,7 @@ def timeline_choice_from_status(
 ) -> TimelineChoice:
     reply_to_id, reply_to_acct = status_reply_target(status)
     author_id, author_acct = status_author_target(status)
+    author_profile_url = status_author_profile_url(status)
     source = status.get("reblog") or status
     return TimelineChoice(
         render_status(status, index if show_numbers else None, show_usernames),
@@ -490,6 +492,7 @@ def timeline_choice_from_status(
         str(status.get("id") or ""),
         author_id,
         author_acct,
+        author_profile_url,
         author_is_known_followed,
     )
 
@@ -501,6 +504,7 @@ def timeline_choice_from_notification(
 ) -> TimelineChoice:
     reply_to_id, reply_to_acct = notification_reply_target(notification)
     author_id, author_acct = notification_author_target(notification)
+    author_profile_url = notification_author_profile_url(notification)
     return TimelineChoice(
         render_notification(notification, index if show_numbers else None),
         notification_links(notification),
@@ -512,6 +516,7 @@ def timeline_choice_from_notification(
         "",
         author_id,
         author_acct,
+        author_profile_url,
     )
 
 
@@ -638,6 +643,8 @@ def open_timeline_choice(
         actions.append("Boost")
     if item.quote_id:
         actions.append("Quote")
+    if item.author_profile_url:
+        actions.append("View Profile")
     author_is_followed = should_offer_unfollow_author(author_relationship) or item.author_is_known_followed
     if should_offer_follow_author(author_relationship, author_is_followed):
         actions.append("Follow Author")
@@ -657,6 +664,8 @@ def open_timeline_choice(
         boost_toot(client, item)
     elif choice == "quote":
         quote_toot(item)
+    elif choice == "view profile":
+        open_url_in_desktop(item.author_profile_url)
     elif choice == "follow author":
         follow_toot_author(client, item)
     elif choice == "unfollow author":
@@ -791,10 +800,16 @@ def status_author_target(status: dict) -> tuple[str, str]:
 
 
 def notification_author_target(notification: dict) -> tuple[str, str]:
-    status = notification.get("status")
-    if isinstance(status, dict):
-        return status_author_target(status)
-    return "", ""
+    return account_target(notification.get("account"))
+
+
+def status_author_profile_url(status: dict) -> str:
+    source = status.get("reblog") or status
+    return account_profile_url(source.get("account"))
+
+
+def notification_author_profile_url(notification: dict) -> str:
+    return account_profile_url(notification.get("account"))
 
 
 def account_target(account: object) -> tuple[str, str]:
@@ -804,6 +819,12 @@ def account_target(account: object) -> tuple[str, str]:
         str(account.get("id") or ""),
         str(account.get("acct") or account.get("username") or ""),
     )
+
+
+def account_profile_url(account: object) -> str:
+    if not isinstance(account, dict):
+        return ""
+    return str(account.get("url") or account.get("uri") or "")
 
 
 def reply_mentions_account(reply: str, mention: str) -> bool:
