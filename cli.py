@@ -12,6 +12,7 @@ from render import (
     account_name,
     notification_links,
     notification_reply_target,
+    plain_text,
     render_notification,
     render_status,
     has_quote_reference,
@@ -118,7 +119,15 @@ def menu() -> int:
         #5. Post a status
         #q. Quit""")
         try:                        
-            choices=["Login","Home Timeline","Notifications","Post Status","Settings","Quit"]
+            choices=[
+                "Login",
+                "Home Timeline",
+                "Notifications",
+                "Post Status",
+                "Mention User",
+                "Settings",
+                "Quit",
+            ]
             choice = dialogs.request_choice(choices,"Welcome to Mastodon")
             if choice==None:
                 return 0
@@ -147,6 +156,8 @@ def menu() -> int:
                     
                     visibility = prompt_visibility()
                     post(argparse.Namespace(status=status, visibility=visibility))
+            elif choice == "mention user":
+                mention_user(argparse.Namespace())
             elif choice == "settings":
                 settings(argparse.Namespace())
             else:
@@ -292,6 +303,89 @@ def boost(args: argparse.Namespace) -> int:
     status = client.boost_status(args.status_id)
     dialogs.showMessage(f"Boosted:\n{render_status(status)}")
     return 0
+
+
+def mention_user(_: argparse.Namespace) -> int:
+    client = MastodonClient(load_config())
+    account = client.verify_account()
+    account_id = str(account.get("id") or "")
+    if not account_id:
+        raise RuntimeError("Could not determine your account ID")
+
+    following = client.account_following(account_id)
+    if not following:
+        dialogs.showMessage("No followed users to show.")
+        return 0
+
+    search = prompt("Search display name: ")
+    if search is None:
+        return 0
+
+    matches = filter_accounts_by_display_name(following, search)
+    if not matches:
+        dialogs.showMessage("No matching followed users.")
+        return 0
+
+    selected = request_account_choice(matches, "Mention User")
+    if selected is None:
+        return 0
+
+    _, acct = account_target(selected)
+    mention = account_mention(acct)
+    if not mention:
+        dialogs.showMessage("This user cannot be mentioned.")
+        return 0
+
+    text = prompt(f"Post {mention}: ")
+    if text is None:
+        return 0
+    status = text
+    if not reply_mentions_account(status, mention):
+        status = f"{mention} {status}".strip()
+    visibility = prompt_visibility()
+    post(
+        argparse.Namespace(
+            status=status,
+            visibility=visibility,
+            in_reply_to_id=None,
+            quote_status_id=None,
+        )
+    )
+    return 0
+
+
+def filter_accounts_by_display_name(accounts: list[dict], search: str) -> list[dict]:
+    query = search.strip().lower()
+    if not query:
+        return accounts
+
+    return [
+        account
+        for account in accounts
+        if query in account_display_name(account).lower()
+    ]
+
+
+def account_display_name(account: dict) -> str:
+    return plain_text(str(account.get("display_name") or ""))
+
+
+def request_account_choice(accounts: list[dict], title: str) -> dict | None:
+    by_label: dict[str, dict] = {}
+    for index, account in enumerate(accounts, 1):
+        label = f"{index}. {account_name(account)}"
+        by_label[label] = account
+
+    choices = list(by_label)
+    choices.append(BACK_CHOICE)
+    choice = dialogs.request_choice(choices, title)
+    if choice is None:
+        return None
+
+    label = choice.label
+    if label.strip().lower() == BACK_CHOICE.lower():
+        return None
+    return by_label.get(label)
 
 
 def posted_status_message(action: str, status: dict, quoted_status_id: str | None = None) -> str:

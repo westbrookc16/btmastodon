@@ -82,6 +82,15 @@ class MastodonClient:
             raise RuntimeError("Unexpected account response")
         return response
 
+    def account_following(self, account_id: str, limit: int = 80) -> list[dict]:
+        response = self.http.get(
+            f"/api/v1/accounts/{quote(account_id)}/following",
+            {"limit": limit},
+        )
+        if not isinstance(response, list):
+            raise RuntimeError("Unexpected following response")
+        return response
+
     def home_timeline(self, limit: int = 20, max_id: str | None = None) -> list[dict]:
         params = {"limit": limit}
         if max_id:
