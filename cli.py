@@ -2,6 +2,7 @@ from BTSpeak import dialogs
 #from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass, replace
 
@@ -24,6 +25,7 @@ from render import (
 
 BACK_CHOICE = "Back"
 LOAD_NEXT_CHOICE = "Load Next"
+MENTION_RE = re.compile(r"(^|\s)@[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.-]+)?\b")
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class TimelineChoice:
     author_acct: str
     author_profile_url: str
     author_is_known_followed: bool = False
+    default_visibility: str = ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     notifications_parser = subcommands.add_parser("notifications", help="Read notifications")
     notifications_parser.add_argument("--limit", type=bounded_limit, default=20)
     notifications_parser.set_defaults(func=notifications)
+
+    direct_parser = subcommands.add_parser("direct", help="Read direct messages")
+    direct_parser.add_argument("--limit", type=bounded_limit, default=20)
+    direct_parser.set_defaults(func=direct_messages)
 
     post_parser = subcommands.add_parser("post", help="Post a status")
     post_parser.add_argument("status", help="Status text to post")
@@ -124,6 +131,7 @@ def menu() -> int:
                 "Login",
                 "Home Timeline",
                 "Notifications",
+                "Direct Messages",
                 "Post Status",
                 "Mention User",
                 "Settings",
@@ -149,6 +157,8 @@ def menu() -> int:
                 timeline(argparse.Namespace(limit=20))
             elif choice == "notifications":
                 notifications(argparse.Namespace(limit=20))
+            elif choice == "direct messages":
+                direct_messages(argparse.Namespace(limit=20))
             elif choice == "4":
                 whoami(argparse.Namespace())
             elif choice == "post status":
@@ -156,7 +166,15 @@ def menu() -> int:
                 if status!=None:
                     
                     visibility = prompt_visibility()
-                    post(argparse.Namespace(status=status, visibility=visibility))
+                    post(
+                        argparse.Namespace(
+                            status=status,
+                            visibility=visibility,
+                            prompt_direct_recipient=True,
+                            in_reply_to_id=None,
+                            quote_status_id=None,
+                        )
+                    )
             elif choice == "mention user":
                 mention_user(argparse.Namespace())
             elif choice == "settings":
@@ -273,12 +291,32 @@ def notifications(args: argparse.Namespace) -> int:
     return 0
 
 
+def direct_messages(args: argparse.Namespace) -> int:
+    config = load_config()
+    client = MastodonClient(config)
+    conversations = client.conversations(args.limit)
+    show_direct_messages_menu(
+        client,
+        conversations,
+        args.limit,
+        config.show_toot_numbers,
+        config.show_toot_usernames,
+    )
+    return 0
+
+
 def post(args: argparse.Namespace) -> int:
     client = MastodonClient(load_config())
     status_text = args.status
     quote_status_id = getattr(args, "quote_status_id", None)
     if quote_status_id:
         status_text = quote_status_text(client, quote_status_id, status_text)
+    status_text = ensure_direct_status_recipient(
+        client,
+        status_text,
+        args.visibility,
+        bool(getattr(args, "prompt_direct_recipient", False)),
+    )
 
     status = client.post_status(
         status_text,
@@ -291,8 +329,15 @@ def post(args: argparse.Namespace) -> int:
 
 def quote(args: argparse.Namespace) -> int:
     client = MastodonClient(load_config())
+    status_text = quote_status_text(client, args.status_id, args.status)
+    status_text = ensure_direct_status_recipient(
+        client,
+        status_text,
+        args.visibility,
+        bool(getattr(args, "prompt_direct_recipient", False)),
+    )
     status = client.post_status(
-        quote_status_text(client, args.status_id, args.status),
+        status_text,
         args.visibility,
     )
     dialogs.showMessage(posted_status_message("Quoted", status))
@@ -348,6 +393,7 @@ def mention_user(_: argparse.Namespace) -> int:
         argparse.Namespace(
             status=status,
             visibility=visibility,
+            prompt_direct_recipient=True,
             in_reply_to_id=None,
             quote_status_id=None,
         )
@@ -520,6 +566,64 @@ def timeline_choice_from_notification(
     )
 
 
+def timeline_choice_from_conversation(
+    conversation: dict,
+    index: int,
+    show_numbers: bool = True,
+    show_usernames: bool = True,
+) -> TimelineChoice:
+    status = conversation.get("last_status")
+    if not isinstance(status, dict):
+        participants = conversation_participants(conversation, show_usernames)
+        prefix = f"{index}. " if show_numbers else ""
+        label = f"{prefix}Direct message with {participants}" if participants else f"{prefix}Direct message"
+        return TimelineChoice(label, [], "", "", "", "", "", str(conversation.get("id") or ""), "", "", "")
+
+    item = timeline_choice_from_status(status, index, show_numbers, show_usernames)
+    participants = conversation_participants(conversation, show_usernames)
+    recipient_acct = conversation_recipient_acct(conversation)
+    if participants:
+        label = f"Direct message with {participants}\n{item.label}"
+    else:
+        label = f"Direct message\n{item.label}"
+    return replace(
+        item,
+        label=label,
+        reply_to_acct=recipient_acct or item.reply_to_acct,
+        boost_id="",
+        quote_id="",
+        quote_url="",
+        page_id=str(conversation.get("id") or ""),
+        default_visibility="direct",
+    )
+
+
+def conversation_participants(conversation: dict, show_usernames: bool = True) -> str:
+    accounts = conversation.get("accounts")
+    if not isinstance(accounts, list):
+        return ""
+
+    names = [
+        account_name(account, show_usernames)
+        for account in accounts
+        if isinstance(account, dict)
+    ]
+    return ", ".join(name for name in names if name)
+
+
+def conversation_recipient_acct(conversation: dict) -> str:
+    accounts = conversation.get("accounts")
+    if not isinstance(accounts, list):
+        return ""
+
+    for account in accounts:
+        if isinstance(account, dict):
+            acct = str(account.get("acct") or account.get("username") or "").strip()
+            if acct:
+                return acct
+    return ""
+
+
 def show_home_timeline_menu(
     client: MastodonClient,
     statuses: list[dict],
@@ -569,6 +673,49 @@ def show_home_timeline_menu(
                     author_is_known_followed=not bool(status.get("reblog")),
                 )
                 for index, status in enumerate(next_statuses, 1)
+            ]
+            continue
+
+        open_timeline_choice(client, choice, show_numbers, show_usernames)
+
+
+def show_direct_messages_menu(
+    client: MastodonClient,
+    conversations: list[dict],
+    limit: int,
+    show_numbers: bool,
+    show_usernames: bool,
+) -> None:
+    items = [
+        timeline_choice_from_conversation(conversation, index, show_numbers, show_usernames)
+        for index, conversation in enumerate(conversations, 1)
+        if isinstance(conversation, dict)
+    ]
+
+    while True:
+        choice = request_timeline_choice(
+            items,
+            "Direct Messages",
+            include_load_next=True,
+            load_next_count=limit,
+        )
+        if choice is None:
+            return
+        if choice == LOAD_NEXT_CHOICE:
+            max_id = last_page_id(items)
+            if not max_id:
+                dialogs.showMessage("No more direct messages to load.")
+                continue
+
+            next_conversations = client.conversations(limit, max_id=max_id)
+            if not next_conversations:
+                dialogs.showMessage("No more direct messages to load.")
+                continue
+
+            items = [
+                timeline_choice_from_conversation(conversation, index, show_numbers, show_usernames)
+                for index, conversation in enumerate(next_conversations, 1)
+                if isinstance(conversation, dict)
             ]
             continue
 
@@ -723,11 +870,12 @@ def reply_to_toot(item: TimelineChoice) -> None:
         return
     if mention and not reply_mentions_account(reply, mention):
         reply = f"{mention} {reply}"
-    visibility = prompt_visibility()
+    visibility = item.default_visibility or prompt_visibility()
     post(
         argparse.Namespace(
             status=reply,
             visibility=visibility,
+            prompt_direct_recipient=False,
             in_reply_to_id=item.reply_to_id,
             quote_status_id=None,
         )
@@ -756,6 +904,7 @@ def quote_toot(item: TimelineChoice) -> None:
         argparse.Namespace(
             status=f"RE: {item.quote_url}\n\n{text}",
             visibility=visibility,
+            prompt_direct_recipient=True,
             in_reply_to_id=None,
             quote_status_id=None,
         )
@@ -829,6 +978,54 @@ def account_profile_url(account: object) -> str:
 
 def reply_mentions_account(reply: str, mention: str) -> bool:
     return mention.lower() in reply.lower().split()
+
+
+def ensure_direct_status_recipient(
+    client: MastodonClient,
+    status_text: str,
+    visibility: str,
+    prompt_for_recipient: bool = False,
+) -> str:
+    if visibility != "direct" or status_has_mention(status_text):
+        return status_text
+    if not prompt_for_recipient:
+        raise ValueError("Direct messages must mention at least one recipient")
+
+    mention = prompt_direct_recipient(client)
+    if not mention:
+        raise ValueError("Direct messages must mention at least one recipient")
+    return f"{mention} {status_text}".strip()
+
+
+def status_has_mention(status_text: str) -> bool:
+    return bool(MENTION_RE.search(status_text))
+
+
+def prompt_direct_recipient(client: MastodonClient) -> str:
+    account = client.verify_account()
+    account_id = str(account.get("id") or "")
+    if not account_id:
+        raise RuntimeError("Could not determine your account ID")
+
+    following = client.account_following(account_id)
+    if not following:
+        raise ValueError("Direct messages require a mentioned recipient")
+
+    search = prompt("Search display name: ")
+    if search is None:
+        return ""
+
+    matches = filter_accounts_by_display_name(following, search)
+    if not matches:
+        dialogs.showMessage("No matching followed users.")
+        return ""
+
+    selected = request_account_choice(matches, "Direct Message Recipient")
+    if selected is None:
+        return ""
+
+    _, acct = account_target(selected)
+    return account_mention(acct)
 
 
 def view_conversation(

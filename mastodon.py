@@ -107,6 +107,16 @@ class MastodonClient:
             raise RuntimeError("Unexpected notifications response")
         return response
 
+    def conversations(self, limit: int = 20, max_id: str | None = None) -> list[dict]:
+        params = {"limit": limit}
+        if max_id:
+            params["max_id"] = max_id
+
+        response = self.http.get("/api/v1/conversations", params)
+        if not isinstance(response, list):
+            raise RuntimeError("Unexpected conversations response")
+        return response
+
     def status_context(self, status_id: str) -> dict:
         response = self.http.get(f"/api/v1/statuses/{quote(status_id)}/context")
         if not isinstance(response, dict):
