@@ -4,7 +4,7 @@ from BTSpeak import dialogs
 import argparse
 import re
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from config import ConfigError, load_config, save_config
 from api import ApiError
@@ -43,6 +43,7 @@ class TimelineChoice:
     author_profile_url: str
     author_is_known_followed: bool = False
     default_visibility: str = ""
+    reply_mentions: list[str] = field(default_factory=list)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -363,31 +364,16 @@ def mention_user(_: argparse.Namespace) -> int:
         dialogs.showMessage("No followed users to show.")
         return 0
 
-    search = prompt("Search display name: ")
-    if search is None:
+    mentions = prompt_mention_accounts(following)
+    if not mentions:
         return 0
 
-    matches = filter_accounts_by_display_name(following, search)
-    if not matches:
-        dialogs.showMessage("No matching followed users.")
-        return 0
-
-    selected = request_account_choice(matches, "Mention User")
-    if selected is None:
-        return 0
-
-    _, acct = account_target(selected)
-    mention = account_mention(acct)
-    if not mention:
-        dialogs.showMessage("This user cannot be mentioned.")
-        return 0
-
-    text = prompt(f"Post {mention}: ")
+    mention_text = " ".join(mentions)
+    text = prompt(f"Post {mention_text}: ")
     if text is None:
         return 0
-    status = text
-    if not reply_mentions_account(status, mention):
-        status = f"{mention} {status}".strip()
+
+    status = prepend_missing_mentions(text, mentions)
     visibility = prompt_visibility()
     post(
         argparse.Namespace(
@@ -399,6 +385,61 @@ def mention_user(_: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def prompt_mention_accounts(following: list[dict]) -> list[str]:
+    mentions: list[str] = []
+    while True:
+        mention = prompt_mention_account(following, "Mention User")
+        if not mention:
+            return []
+
+        if mention.lower() in {selected.lower() for selected in mentions}:
+            dialogs.showMessage(f"{mention} is already selected.")
+        else:
+            mentions.append(mention)
+
+        choice = dialogs.request_choice(
+            ["Add Another User", "Compose Toot", BACK_CHOICE],
+            selected_mentions_title(mentions),
+        )
+        if choice is None:
+            return []
+
+        value = choice.label.strip().lower()
+        if value == "compose toot":
+            return mentions
+        if value == BACK_CHOICE.lower():
+            return []
+
+
+def selected_mentions_title(mentions: list[str]) -> str:
+    count = len(mentions)
+    if count == 1:
+        return "1 Mention Selected"
+    return f"{count} Mentions Selected"
+
+
+def prompt_mention_account(following: list[dict], title: str) -> str:
+    search = prompt("Search display name: ")
+    if search is None:
+        return ""
+
+    matches = filter_accounts_by_display_name(following, search)
+    if not matches:
+        dialogs.showMessage("No matching followed users.")
+        return ""
+
+    selected = request_account_choice(matches, title)
+    if selected is None:
+        return ""
+
+    _, acct = account_target(selected)
+    mention = account_mention(acct)
+    if not mention:
+        dialogs.showMessage("This user cannot be mentioned.")
+        return ""
+    return mention
 
 
 def filter_accounts_by_display_name(accounts: list[dict], search: str) -> list[dict]:
@@ -540,6 +581,8 @@ def timeline_choice_from_status(
         author_acct,
         author_profile_url,
         author_is_known_followed,
+        "",
+        status_reply_mentions(status),
     )
 
 
@@ -563,6 +606,9 @@ def timeline_choice_from_notification(
         author_id,
         author_acct,
         author_profile_url,
+        False,
+        "",
+        notification_reply_mentions(notification),
     )
 
 
@@ -590,6 +636,7 @@ def timeline_choice_from_conversation(
         item,
         label=label,
         reply_to_acct=recipient_acct or item.reply_to_acct,
+        reply_mentions=conversation_reply_mentions(conversation) or item.reply_mentions,
         boost_id="",
         quote_id="",
         quote_url="",
@@ -622,6 +669,48 @@ def conversation_recipient_acct(conversation: dict) -> str:
             if acct:
                 return acct
     return ""
+
+
+def status_reply_mentions(status: dict) -> list[str]:
+    source = status.get("reblog") or status
+    mentions: list[str] = []
+
+    _, author_acct = account_target(source.get("account"))
+    add_unique_mention(mentions, account_mention(author_acct))
+
+    status_mentions = source.get("mentions")
+    if isinstance(status_mentions, list):
+        for mention in status_mentions:
+            if not isinstance(mention, dict):
+                continue
+            acct = str(mention.get("acct") or mention.get("username") or "")
+            add_unique_mention(mentions, account_mention(acct))
+
+    return mentions
+
+
+def notification_reply_mentions(notification: dict) -> list[str]:
+    status = notification.get("status")
+    if isinstance(status, dict):
+        return status_reply_mentions(status)
+    return []
+
+
+def conversation_reply_mentions(conversation: dict) -> list[str]:
+    accounts = conversation.get("accounts")
+    if not isinstance(accounts, list):
+        return []
+
+    mentions: list[str] = []
+    for account in accounts:
+        _, acct = account_target(account)
+        add_unique_mention(mentions, account_mention(acct))
+    return mentions
+
+
+def add_unique_mention(mentions: list[str], mention: str) -> None:
+    if mention and mention.lower() not in {item.lower() for item in mentions}:
+        mentions.append(mention)
 
 
 def show_home_timeline_menu(
@@ -806,7 +895,7 @@ def open_timeline_choice(
     if choice == "open link":
         open_timeline_links(item.links)
     elif choice == "reply":
-        reply_to_toot(item)
+        reply_to_toot(client, item)
     elif choice == "boost":
         boost_toot(client, item)
     elif choice == "quote":
@@ -859,17 +948,19 @@ def open_timeline_links(links: list[str]) -> None:
         open_url_in_desktop(choice)
 
 
-def reply_to_toot(item: TimelineChoice) -> None:
+def reply_to_toot(client: MastodonClient, item: TimelineChoice) -> None:
     if not item.reply_to_id:
         dialogs.showMessage("This item cannot be replied to.")
         return
 
-    mention = account_mention(item.reply_to_acct)
-    reply = prompt(f"Reply {mention}: " if mention else "Reply: ")
+    mentions = item.reply_mentions or [account_mention(item.reply_to_acct)]
+    mentions = [mention for mention in mentions if mention]
+    mentions = exclude_own_mentions(mentions, client.verify_account())
+    mention_text = " ".join(mentions)
+    reply = prompt(f"Reply {mention_text}: " if mention_text else "Reply: ")
     if reply==None:
         return
-    if mention and not reply_mentions_account(reply, mention):
-        reply = f"{mention} {reply}"
+    reply = prepend_missing_mentions(reply, mentions)
     visibility = item.default_visibility or prompt_visibility()
     post(
         argparse.Namespace(
@@ -943,6 +1034,24 @@ def account_mention(acct: str) -> str:
     return f"@{acct}"
 
 
+def exclude_own_mentions(mentions: list[str], account: dict) -> list[str]:
+    own_mentions = own_account_mentions(account)
+    return [
+        mention
+        for mention in mentions
+        if mention.lower() not in own_mentions
+    ]
+
+
+def own_account_mentions(account: dict) -> set[str]:
+    mentions: set[str] = set()
+    for key in ("acct", "username"):
+        mention = account_mention(str(account.get(key) or ""))
+        if mention:
+            mentions.add(mention.lower())
+    return mentions
+
+
 def status_author_target(status: dict) -> tuple[str, str]:
     source = status.get("reblog") or status
     return account_target(source.get("account"))
@@ -978,6 +1087,17 @@ def account_profile_url(account: object) -> str:
 
 def reply_mentions_account(reply: str, mention: str) -> bool:
     return mention.lower() in reply.lower().split()
+
+
+def prepend_missing_mentions(status_text: str, mentions: list[str]) -> str:
+    missing = [
+        mention
+        for mention in mentions
+        if not reply_mentions_account(status_text, mention)
+    ]
+    if not missing:
+        return status_text
+    return f"{' '.join(missing)} {status_text}".strip()
 
 
 def ensure_direct_status_recipient(
