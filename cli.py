@@ -147,7 +147,7 @@ def menu() -> int:
             return 0
 
         if choice in {"q", "quit", "exit"}:
-            dialogs.showMessage("Goodbye.")
+            dialogs.show_message("Goodbye.", wait_for_speech=true)
             return 0
 
         try:
