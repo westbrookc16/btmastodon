@@ -1255,6 +1255,7 @@ def open_timeline_choice(
     if item.links:
         actions.append("Open Link")
     if item.reply_to_id:
+        actions.append("Reply All")
         actions.append("Reply")
     if item.boost_id:
         actions.append("Boost")
@@ -1276,7 +1277,9 @@ def open_timeline_choice(
     if choice == "open link":
         open_timeline_links(item.links)
     elif choice == "reply":
-        reply_to_toot(client, item)
+        reply_to_toot(client, item, reply_all=False)
+    elif choice == "reply all":
+        reply_to_toot(client, item, reply_all=True)
     elif choice == "boost":
         boost_toot(client, item)
     elif choice == "quote":
@@ -1329,16 +1332,20 @@ def open_timeline_links(links: list[str]) -> None:
         open_url_in_desktop(choice)
 
 
-def reply_to_toot(client: MastodonClient, item: TimelineChoice) -> None:
+def reply_to_toot(client: MastodonClient, item: TimelineChoice, reply_all: bool = True) -> None:
     if not item.reply_to_id:
         dialogs.showMessage("This item cannot be replied to.")
         return
 
-    mentions = item.reply_mentions or [account_mention(item.reply_to_acct)]
+    if reply_all:
+        mentions = item.reply_mentions or [account_mention(item.reply_to_acct)]
+    else:
+        mentions = [account_mention(item.reply_to_acct)]
     mentions = [mention for mention in mentions if mention]
     mentions = exclude_own_mentions(mentions, client.verify_account())
     mention_text = " ".join(mentions)
-    reply = prompt(f"Reply {mention_text}: " if mention_text else "Reply: ")
+    prompt_label = "Reply All" if reply_all else "Reply"
+    reply = prompt(f"{prompt_label} {mention_text}: " if mention_text else f"{prompt_label}: ")
     if reply==None:
         return
     reply = prepend_missing_mentions(reply, mentions)
