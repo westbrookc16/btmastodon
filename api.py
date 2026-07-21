@@ -43,6 +43,15 @@ class HttpClient:
         body = urlencode(form or {}).encode("utf-8")
         return self._request("POST", url, body=body, access_token=token)
 
+    def put(
+        self,
+        path: str,
+        form: dict[str, str | int | bool] | None = None,
+    ) -> JsonValue:
+        url = self._url(path)
+        body = urlencode(form or {}).encode("utf-8")
+        return self._request("PUT", url, body=body)
+
     def _url(self, path: str, params: dict[str, str | int] | None = None) -> str:
         url = f"{self.base_url}{path}"
         if params:

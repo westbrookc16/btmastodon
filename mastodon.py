@@ -101,6 +101,81 @@ class MastodonClient:
             raise RuntimeError("Unexpected timeline response")
         return response
 
+    def lists(self) -> list[dict]:
+        response = self.http.get("/api/v1/lists")
+        if not isinstance(response, list):
+            raise RuntimeError("Unexpected lists response")
+        return response
+
+    def create_list(self, title: str, exclusive: bool = True) -> dict:
+        response = self.http.post(
+            "/api/v1/lists",
+            {"title": title, "exclusive": str(exclusive).lower()},
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected list response")
+        return response
+
+    def update_list(
+        self,
+        list_id: str,
+        title: str,
+        exclusive: bool,
+        replies_policy: str | None = None,
+    ) -> dict:
+        form = {
+            "title": title,
+            "exclusive": str(exclusive).lower(),
+        }
+        if replies_policy:
+            form["replies_policy"] = replies_policy
+
+        response = self.http.put(f"/api/v1/lists/{quote(list_id)}", form)
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected list response")
+        return response
+
+    def list_timeline(
+        self,
+        list_id: str,
+        limit: int = 20,
+        max_id: str | None = None,
+    ) -> list[dict]:
+        params = {"limit": limit}
+        if max_id:
+            params["max_id"] = max_id
+
+        response = self.http.get(f"/api/v1/timelines/list/{quote(list_id)}", params)
+        if not isinstance(response, list):
+            raise RuntimeError("Unexpected list timeline response")
+        return response
+
+    def list_accounts(
+        self,
+        list_id: str,
+        limit: int = 80,
+        max_id: str | None = None,
+    ) -> list[dict]:
+        params = {"limit": limit}
+        if max_id:
+            params["max_id"] = max_id
+
+        response = self.http.get(
+            f"/api/v1/lists/{quote(list_id)}/accounts",
+            params,
+        )
+        if not isinstance(response, list):
+            raise RuntimeError("Unexpected list accounts response")
+        return response
+
+    def add_account_to_list(self, list_id: str, account_id: str) -> None:
+        response = self.http.post(
+            f"/api/v1/lists/{quote(list_id)}/accounts",
+            {"account_ids[]": account_id},
+        )
+        if response not in ({}, None):
+            raise RuntimeError("Unexpected add list account response")
+
     def notifications(self, limit: int = 20) -> list[dict]:
         response = self.http.get("/api/v1/notifications", {"limit": limit})
         if not isinstance(response, list):
