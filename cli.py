@@ -2,15 +2,14 @@ from BTSpeak import dialogs
 #from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 import time
 from dataclasses import dataclass, field, replace
 
-from config import ConfigError, config_dir, load_config, save_config
+from config import ConfigError, load_config, save_config
 from api import ApiError
-from mastodon import MastodonClient, authorize_in_browser, register_app
+from mastodon import MastodonClient, authorize_in_browser, normalize_hashtag_name, register_app
 from render import (
     account_name,
     notification_links,
@@ -91,6 +90,21 @@ def build_parser() -> argparse.ArgumentParser:
     direct_parser.add_argument("--limit", type=bounded_limit, default=20)
     direct_parser.set_defaults(func=direct_messages)
 
+    search_hashtags_parser = subcommands.add_parser(
+        "search-hashtags",
+        help="Search for hashtags",
+    )
+    search_hashtags_parser.add_argument("query", help="Hashtag search text")
+    search_hashtags_parser.add_argument("--limit", type=bounded_limit, default=20)
+    search_hashtags_parser.set_defaults(func=search_hashtags)
+
+    follow_hashtag_parser = subcommands.add_parser(
+        "follow-hashtag",
+        help="Follow a hashtag",
+    )
+    follow_hashtag_parser.add_argument("hashtag", help="Hashtag name, with or without #")
+    follow_hashtag_parser.set_defaults(func=follow_hashtag_command)
+
     post_parser = subcommands.add_parser("post", help="Post a status")
     post_parser.add_argument("status", help="Status text to post")
     post_parser.add_argument(
@@ -139,6 +153,7 @@ def menu() -> int:
                 "Home Timeline",
                 "Notifications",
                 "Direct Messages",
+                "Search Hashtags",
                 *list_choices,
                 "Post Status",
                 "Mention User",
@@ -169,6 +184,8 @@ def menu() -> int:
                 notifications(argparse.Namespace(limit=20))
             elif choice == "direct messages":
                 direct_messages(argparse.Namespace(limit=20))
+            elif choice == "search hashtags":
+                search_hashtags_menu()
             elif choice in {label.lower() for label in list_choices}:
                 selected_list = list_choices[choice_label]
                 list_menu(selected_list)
@@ -293,7 +310,6 @@ def login(args: argparse.Namespace) -> int:
     credentials = register_app(args.instance)
     config = authorize_in_browser(args.instance, credentials)
     path = save_config(config)
-    invalidate_hidden_home_account_ids_cache()
     invalidate_main_menu_lists_cache()
     dialogs.showMessage(f"Logged in. Config saved to {path}")
     return 0
@@ -317,14 +333,12 @@ def timeline(args: argparse.Namespace) -> int:
     config = load_config()
     client = MastodonClient(config)
     statuses = client.home_timeline(args.limit)
-    hidden_home_account_ids = exclusive_list_account_ids(client)
     show_home_timeline_menu(
         client,
         statuses,
         args.limit,
         config.show_toot_numbers,
         config.show_toot_usernames,
-        hidden_home_account_ids,
     )
     return 0
 
@@ -359,6 +373,113 @@ def direct_messages(args: argparse.Namespace) -> int:
         config.show_toot_usernames,
     )
     return 0
+
+
+def search_hashtags(args: argparse.Namespace) -> int:
+    client = MastodonClient(load_config())
+    hashtags = client.search_hashtags(args.query, args.limit)
+    if not hashtags:
+        dialogs.showMessage("No matching hashtags.")
+        return 0
+
+    for hashtag in hashtags:
+        print(hashtag_label(hashtag))
+    return 0
+
+
+def follow_hashtag_command(args: argparse.Namespace) -> int:
+    client = MastodonClient(load_config())
+    follow_hashtag(client, args.hashtag)
+    return 0
+
+
+def search_hashtags_menu() -> int:
+    config = load_config()
+    client = MastodonClient(config)
+    query = prompt("Search hashtag: ")
+    if query is None:
+        return 0
+
+    hashtags = client.search_hashtags(query, 20)
+    if not hashtags:
+        dialogs.showMessage("No matching hashtags.")
+        return 0
+
+    while True:
+        selected = request_hashtag_choice(hashtags, "Hashtags")
+        if selected is None:
+            return 0
+        open_hashtag_choice(
+            client,
+            selected,
+            config.show_toot_numbers,
+            config.show_toot_usernames,
+        )
+
+
+def request_hashtag_choice(hashtags: list[dict], title: str) -> dict | None:
+    by_label: dict[str, dict] = {}
+    for index, hashtag in enumerate(hashtags, 1):
+        label = f"{index}. {hashtag_label(hashtag)}"
+        by_label[label] = hashtag
+
+    choices = list(by_label)
+    choices.append(BACK_CHOICE)
+    choice = dialogs.request_choice(choices, title)
+    if choice is None:
+        return None
+
+    label = choice.label
+    if label.strip().lower() == BACK_CHOICE.lower():
+        return None
+    return by_label.get(label)
+
+
+def open_hashtag_choice(
+    client: MastodonClient,
+    hashtag: dict,
+    show_numbers: bool,
+    show_usernames: bool,
+) -> None:
+    name = hashtag_name(hashtag)
+    if not name:
+        dialogs.showMessage("This hashtag cannot be opened.")
+        return
+
+    actions = ["Read Hashtag"]
+    if hashtag_url(hashtag):
+        actions.append("Open Hashtag")
+    if hashtag.get("following"):
+        actions.append("Unfollow Hashtag")
+    else:
+        actions.append("Follow Hashtag")
+    actions.append(BACK_CHOICE)
+
+    choice = dialogs.request_choice(actions, f"Hashtag: #{name}")
+    if choice is None:
+        return
+    value = choice.label.strip().lower()
+    if value == "read hashtag":
+        show_hashtag_timeline(client, name, 20, show_numbers, show_usernames)
+    elif value == "open hashtag":
+        open_url_in_desktop(hashtag_url(hashtag))
+    elif value == "follow hashtag":
+        updated = follow_hashtag(client, name)
+        hashtag.update(updated)
+    elif value == "unfollow hashtag":
+        updated = client.unfollow_hashtag(name)
+        hashtag.update(updated)
+        dialogs.showMessage(f"Unfollowed #{hashtag_name(updated) or name}.")
+
+
+def follow_hashtag(client: MastodonClient, hashtag: str) -> dict:
+    tag = client.follow_hashtag(hashtag)
+    name = hashtag_name(tag) or normalize_hashtag_name(hashtag)
+    if tag.get("following"):
+        dialogs.showMessage(f"Followed #{name}.")
+    else:
+        dialogs.showMessage(f"Follow request sent for #{name}.")
+    return tag
 
 
 def create_list(_: argparse.Namespace) -> int:
@@ -482,8 +603,6 @@ def add_user_to_list(client: MastodonClient, mastodon_list: dict) -> None:
         return
 
     client.add_account_to_list(list_id, account_id)
-    if list_is_exclusive(mastodon_list):
-        add_hidden_home_account_id_to_cache(account_id)
     user = account_mention(acct) or account_name(selected)
     dialogs.showMessage(f"Added {user} to {list_title(mastodon_list)}.")
 
@@ -503,7 +622,6 @@ def set_list_exclusive(
         exclusive,
         list_replies_policy(mastodon_list),
     )
-    invalidate_hidden_home_account_ids_cache()
     invalidate_main_menu_lists_cache()
     if exclusive:
         dialogs.showMessage(f"Users in {list_title(updated_list)} will be hidden from Home.")
@@ -712,6 +830,54 @@ def request_account_choice(accounts: list[dict], title: str) -> dict | None:
     return by_label.get(label)
 
 
+def hashtag_name(hashtag: dict) -> str:
+    return str(hashtag.get("name") or "").strip().lstrip("#")
+
+
+def hashtag_url(hashtag: dict) -> str:
+    return str(hashtag.get("url") or "").strip()
+
+
+def hashtag_label(hashtag: dict) -> str:
+    name = hashtag_name(hashtag) or "unknown"
+    parts = [f"#{name}"]
+    usage = hashtag_recent_usage(hashtag)
+    if usage:
+        parts.append(usage)
+    if hashtag.get("following"):
+        parts.append("following")
+    return ", ".join(parts)
+
+
+def hashtag_recent_usage(hashtag: dict) -> str:
+    history = hashtag.get("history")
+    if not isinstance(history, list):
+        return ""
+
+    uses = 0
+    accounts = 0
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        uses += int_or_zero(item.get("uses"))
+        accounts += int_or_zero(item.get("accounts"))
+
+    if uses and accounts:
+        return f"{uses} posts by {accounts} users"
+    if uses:
+        return f"{uses} posts"
+    if accounts:
+        return f"{accounts} users"
+    return ""
+
+
+def int_or_zero(value: object) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def mastodon_list_id(mastodon_list: dict) -> str:
     return str(mastodon_list.get("id") or "").strip()
 
@@ -780,117 +946,9 @@ def enrich_quoted_notifications(client: MastodonClient, notifications: list[dict
     enrich_quoted_statuses(client, statuses)
 
 
-def exclusive_list_account_ids(client: MastodonClient) -> set[str]:
-    cached_account_ids = load_hidden_home_account_ids_cache()
-    if cached_account_ids is not None:
-        return cached_account_ids
-
-    account_ids: set[str] = set()
-    for mastodon_list in client.lists():
-        if not isinstance(mastodon_list, dict) or not list_is_exclusive(mastodon_list):
-            continue
-
-        list_id = mastodon_list_id(mastodon_list)
-        if not list_id:
-            continue
-
-        for account in exclusive_list_accounts(client, list_id):
-            account_id, _ = account_target(account)
-            if account_id:
-                account_ids.add(account_id)
-    save_hidden_home_account_ids_cache(account_ids)
-    return account_ids
-
-
-def hidden_home_account_ids_cache_path():
-    return config_dir() / "hidden_home_account_ids.json"
-
-
-def load_hidden_home_account_ids_cache() -> set[str] | None:
-    try:
-        raw = json.loads(hidden_home_account_ids_cache_path().read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-
-    if not isinstance(raw, dict):
-        return None
-    try:
-        expires_at = float(raw.get("expires_at") or 0)
-    except (TypeError, ValueError):
-        return None
-    if expires_at <= time.time():
-        return None
-
-    account_ids = raw.get("account_ids")
-    if not isinstance(account_ids, list):
-        return None
-    return {str(account_id) for account_id in account_ids if str(account_id)}
-
-
-def save_hidden_home_account_ids_cache(account_ids: set[str]) -> None:
-    path = hidden_home_account_ids_cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "expires_at": time.time() + CACHE_TTL_SECONDS,
-        "account_ids": sorted(account_ids),
-    }
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-def add_hidden_home_account_id_to_cache(account_id: str) -> None:
-    cached_account_ids = load_hidden_home_account_ids_cache()
-    if cached_account_ids is None:
-        return
-
-    cached_account_ids.add(account_id)
-    save_hidden_home_account_ids_cache(cached_account_ids)
-
-
-def invalidate_hidden_home_account_ids_cache() -> None:
-    try:
-        hidden_home_account_ids_cache_path().unlink()
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
-
-
-def exclusive_list_accounts(client: MastodonClient, list_id: str) -> list[dict]:
-    accounts: list[dict] = []
-    max_id: str | None = None
-    while True:
-        page = client.list_accounts(list_id, max_id=max_id)
-        if not page:
-            return accounts
-
-        accounts.extend(page)
-        max_id = last_account_id(page)
-        if not max_id:
-            return accounts
-
-
-def last_account_id(accounts: list[dict]) -> str:
-    for account in reversed(accounts):
-        account_id, _ = account_target(account)
-        if account_id:
-            return account_id
-    return ""
-
-
-def filter_home_statuses(statuses: list[dict], hidden_account_ids: set[str]) -> list[dict]:
-    if not hidden_account_ids:
-        return statuses
-
-    return [
-        status
-        for status in statuses
-        if status_author_id(status) not in hidden_account_ids
-    ]
-
-
 def settings(_: argparse.Namespace) -> int:
     config = load_config()
-    choices = ["Toot Numbers", "Toot Usernames", "Clear Cache", BACK_CHOICE]
+    choices = ["Toot Numbers", "Toot Usernames", BACK_CHOICE]
     choice = dialogs.request_choice(choices, "Settings")
     if choice is None:
         return 0
@@ -914,15 +972,7 @@ def settings(_: argparse.Namespace) -> int:
         save_config(replace(config, show_toot_usernames=show_toot_usernames))
         state = "shown" if show_toot_usernames else "hidden"
         dialogs.showMessage(f"Toot usernames will be {state}.")
-    elif value == "clear cache":
-        clear_cache()
     return 0
-
-
-def clear_cache() -> None:
-    invalidate_hidden_home_account_ids_cache()
-    invalidate_main_menu_lists_cache()
-    dialogs.showMessage("Cache cleared.")
 
 
 def timeline_choice_from_status(
@@ -1087,11 +1137,8 @@ def show_home_timeline_menu(
     limit: int,
     show_numbers: bool,
     show_usernames: bool,
-    hidden_account_ids: set[str] | None = None,
 ) -> None:
-    hidden_account_ids = hidden_account_ids or set()
     next_max_id = last_status_id(statuses)
-    statuses = filter_home_statuses(statuses, hidden_account_ids)
     enrich_quoted_statuses(client, statuses)
     items = [
         timeline_choice_from_status(
@@ -1120,7 +1167,6 @@ def show_home_timeline_menu(
 
             next_statuses = client.home_timeline(limit, max_id=next_max_id)
             next_max_id = last_status_id(next_statuses)
-            next_statuses = filter_home_statuses(next_statuses, hidden_account_ids)
             if not next_statuses:
                 dialogs.showMessage("No more timeline items to load.")
                 continue
@@ -1178,6 +1224,50 @@ def show_direct_messages_menu(
                 timeline_choice_from_conversation(conversation, index, show_numbers, show_usernames)
                 for index, conversation in enumerate(next_conversations, 1)
                 if isinstance(conversation, dict)
+            ]
+            continue
+
+        open_timeline_choice(client, choice, show_numbers, show_usernames)
+
+
+def show_hashtag_timeline(
+    client: MastodonClient,
+    hashtag: str,
+    limit: int,
+    show_numbers: bool,
+    show_usernames: bool,
+) -> None:
+    statuses = client.hashtag_timeline(hashtag, limit)
+    enrich_quoted_statuses(client, statuses)
+    items = [
+        timeline_choice_from_status(status, index, show_numbers, show_usernames)
+        for index, status in enumerate(statuses, 1)
+    ]
+
+    while True:
+        choice = request_timeline_choice(
+            items,
+            f"#{normalize_hashtag_name(hashtag)}",
+            include_load_next=True,
+            load_next_count=limit,
+        )
+        if choice is None:
+            return
+        if choice == LOAD_NEXT_CHOICE:
+            max_id = last_page_id(items)
+            if not max_id:
+                dialogs.showMessage("No more hashtag items to load.")
+                continue
+
+            next_statuses = client.hashtag_timeline(hashtag, limit, max_id=max_id)
+            if not next_statuses:
+                dialogs.showMessage("No more hashtag items to load.")
+                continue
+
+            enrich_quoted_statuses(client, next_statuses)
+            items = [
+                timeline_choice_from_status(status, index, show_numbers, show_usernames)
+                for index, status in enumerate(next_statuses, 1)
             ]
             continue
 

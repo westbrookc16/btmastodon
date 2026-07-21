@@ -101,6 +101,24 @@ class MastodonClient:
             raise RuntimeError("Unexpected timeline response")
         return response
 
+    def hashtag_timeline(
+        self,
+        hashtag: str,
+        limit: int = 20,
+        max_id: str | None = None,
+    ) -> list[dict]:
+        params = {"limit": limit}
+        if max_id:
+            params["max_id"] = max_id
+
+        response = self.http.get(
+            f"/api/v1/timelines/tag/{quote(normalize_hashtag_name(hashtag), safe='')}",
+            params,
+        )
+        if not isinstance(response, list):
+            raise RuntimeError("Unexpected hashtag timeline response")
+        return response
+
     def lists(self) -> list[dict]:
         response = self.http.get("/api/v1/lists")
         if not isinstance(response, list):
@@ -148,24 +166,6 @@ class MastodonClient:
         response = self.http.get(f"/api/v1/timelines/list/{quote(list_id)}", params)
         if not isinstance(response, list):
             raise RuntimeError("Unexpected list timeline response")
-        return response
-
-    def list_accounts(
-        self,
-        list_id: str,
-        limit: int = 80,
-        max_id: str | None = None,
-    ) -> list[dict]:
-        params = {"limit": limit}
-        if max_id:
-            params["max_id"] = max_id
-
-        response = self.http.get(
-            f"/api/v1/lists/{quote(list_id)}/accounts",
-            params,
-        )
-        if not isinstance(response, list):
-            raise RuntimeError("Unexpected list accounts response")
         return response
 
     def add_account_to_list(self, list_id: str, account_id: str) -> None:
@@ -225,6 +225,23 @@ class MastodonClient:
                 return status
         return None
 
+    def search_hashtags(self, query: str, limit: int = 20) -> list[dict]:
+        response = self.http.get(
+            "/api/v2/search",
+            {
+                "q": query,
+                "type": "hashtags",
+                "limit": limit,
+            },
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected search response")
+
+        hashtags = response.get("hashtags")
+        if not isinstance(hashtags, list):
+            return []
+        return [hashtag for hashtag in hashtags if isinstance(hashtag, dict)]
+
     def post_status(
         self,
         status: str,
@@ -276,6 +293,29 @@ class MastodonClient:
         if not isinstance(response, dict):
             raise RuntimeError("Unexpected unfollow response")
         return response
+
+    def follow_hashtag(self, hashtag: str) -> dict:
+        response = self.http.post(
+            f"/api/v1/tags/{quote(normalize_hashtag_name(hashtag), safe='')}/follow"
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected hashtag follow response")
+        return response
+
+    def unfollow_hashtag(self, hashtag: str) -> dict:
+        response = self.http.post(
+            f"/api/v1/tags/{quote(normalize_hashtag_name(hashtag), safe='')}/unfollow"
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected hashtag unfollow response")
+        return response
+
+
+def normalize_hashtag_name(hashtag: str) -> str:
+    name = hashtag.strip().lstrip("#")
+    if not name:
+        raise ValueError("Hashtag cannot be empty")
+    return name
 
 
 def authorize_in_browser(instance: str, credentials: ClientCredentials) -> AccountConfig:
