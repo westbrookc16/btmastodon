@@ -47,6 +47,7 @@ class TimelineChoice:
     author_is_known_followed: bool = False
     default_visibility: str = ""
     reply_mentions: list[str] = field(default_factory=list)
+    hotkeys: dict = field(default_factory=dict)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -333,6 +334,8 @@ def timeline(args: argparse.Namespace) -> int:
     config = load_config()
     client = MastodonClient(config)
     statuses = client.home_timeline(args.limit)
+    for s in statuses:
+        s.hotkeys={"r":reply_to_toot(client,s,False)}
     show_home_timeline_menu(
         client,
         statuses,
@@ -1307,7 +1310,7 @@ def request_timeline_choice(
             choices.append(f"{LOAD_NEXT_CHOICE} {load_next_count}")
     choices.append(BACK_CHOICE)
 
-    choice = dialogs.request_choice(choices, title)
+    choice = dialogs.dynamic_menu(choices, title)
     if choice is None:
         return None
     label = choice.label
