@@ -47,9 +47,50 @@ class TimelineChoice:
     author_is_known_followed: bool = False
     default_visibility: str = ""
     reply_mentions: list[str] = field(default_factory=list)
-    hotkeys: dict = field(default_factory=dict)
-
-
+    
+def menu_open_links(item):
+    timeline_item=item.timeline_choice or None
+    if (timeline_item!=None):
+        open_timeline_links(timeline_item.links)
+def menu_reply_all(item):
+    timeline_item=item.timeline_choice or None
+    if timeline_item==None:
+        return
+    client=MastodonClient(load_config())
+    reply_to_toot(client,timeline_item,True)
+def menu_post_status():
+    client=MastodonClient(load_config())
+    status = prompt("Status text: ")
+    if status!=None:
+                    
+        visibility = prompt_visibility()
+        post(
+            argparse.Namespace(
+                status=status,
+                visibility=visibility,
+                prompt_direct_recipient=True,
+                in_reply_to_id=None,
+                quote_status_id=None,
+            )
+        )
+def menu_view_conversation(item):
+    timeline_item=item.timeline_choice or None
+    if timeline_item==None:
+        dialogs.show_message("Converwsation cannot be viewed.")
+    config=load_config()
+    client=MastodonClient(config)
+    view_conversation(client,timeline_item,show_numbers=config.show_toot_numbers,show_usernames=config.show_toot_usernames)
+def menu_boost(item):
+    timeline_item=item.timeline_choice
+    client=MastodonClient(load_config())
+    boost_toot(client,timeline_item)
+def menu_reply_author(item):
+    timeline_item = getattr(item, "timeline_choice", None)
+    if timeline_item is None:
+        dialogs.showMessage("This item cannot be replied to.")
+        return
+    client= MastodonClient(load_config())
+    reply_to_toot(client,timeline_item,False)
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
@@ -334,8 +375,7 @@ def timeline(args: argparse.Namespace) -> int:
     config = load_config()
     client = MastodonClient(config)
     statuses = client.home_timeline(args.limit)
-    for s in statuses:
-        s.hotkeys={"r":reply_to_toot(client,s,False)}
+    
     show_home_timeline_menu(
         client,
         statuses,
@@ -1301,25 +1341,51 @@ def request_timeline_choice(
         dialogs.showMessage(f"No {title.lower()} to show.")
         return None
 
-    by_label = {(item.label or "(empty)"): item for item in items}
-    choices = list(by_label)
+    def select(menu: dialogs.DynamicMenuDialog) -> None:
+        menu.close()
+
+    def menu_label(label: str) -> str:
+        return " ".join((label or "(empty)").split()) or "(empty)"
+
+    def unique_label(label: str, used_labels: set[str]) -> str:
+        candidate = label
+        suffix = 2
+        while candidate in used_labels:
+            candidate = f"{label} ({suffix})"
+            suffix += 1
+        used_labels.add(candidate)
+        return candidate
+
+    by_label: dict[str, TimelineChoice | str] = {}
+    used_labels: set[str] = set()
+    choices = []
+    for item in items:
+        label = unique_label(menu_label(item.label), used_labels)
+        by_label[label] = item
+        menu_item = dialogs.DynamicMenuItem(title=label, action=select)
+        menu_item.timeline_choice = item
+        choices.append(menu_item)
     if include_load_next:
         if load_next_count is None:
-            choices.append(LOAD_NEXT_CHOICE)
+            label = unique_label(LOAD_NEXT_CHOICE, used_labels)
         else:
-            choices.append(f"{LOAD_NEXT_CHOICE} {load_next_count}")
-    choices.append(BACK_CHOICE)
+            label = unique_label(f"{LOAD_NEXT_CHOICE} {load_next_count}", used_labels)
+        by_label[label] = LOAD_NEXT_CHOICE
+        choices.append(dialogs.DynamicMenuItem(title=label, action=select))
+    back_label = unique_label(BACK_CHOICE, used_labels)
+    by_label[back_label] = BACK_CHOICE
+    choices.append(dialogs.DynamicMenuItem(title=back_label, action=select))
 
-    choice = dialogs.dynamic_menu(choices, title)
+    choice = dialogs.dynamic_menu(choices, title,global_keys={"r":menu_reply_author,"b":menu_boost,"v":menu_view_conversation,"p":menu_post_status,"a":menu_reply_all,"l":menu_open_links})
     if choice is None:
         return None
     label = choice.label
-    normalized = label.strip().lower()
-    if normalized == BACK_CHOICE.lower():
+    selected = by_label.get(label)
+    if selected == BACK_CHOICE:
         return None
-    if normalized.startswith(LOAD_NEXT_CHOICE.lower()):
+    if selected == LOAD_NEXT_CHOICE:
         return LOAD_NEXT_CHOICE
-    return by_label.get(label)
+    return selected if isinstance(selected, TimelineChoice) else None
 
 
 def last_page_id(items: list[TimelineChoice]) -> str:
