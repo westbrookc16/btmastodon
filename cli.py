@@ -1,4 +1,4 @@
-from BTSpeak import dialogs 
+from BTSpeak import host, dialogs 
 #from __future__ import annotations
 
 import argparse
@@ -1375,8 +1375,11 @@ def request_timeline_choice(
     back_label = unique_label(BACK_CHOICE, used_labels)
     by_label[back_label] = BACK_CHOICE
     choices.append(dialogs.DynamicMenuItem(title=back_label, action=select))
-
-    choice = dialogs.dynamic_menu(choices, title,global_keys={"r":menu_reply_author,"b":menu_boost,"v":menu_view_conversation,"p":menu_post_status,"a":menu_reply_all,"l":menu_open_links})
+    try:
+        host.push_app_context("timeline_help")
+        choice = dialogs.dynamic_menu(choices, title,global_keys={"r":menu_reply_author,"b":menu_boost,"v":menu_view_conversation,"p":menu_post_status,"a":menu_reply_all,"l":menu_open_links})
+    finally:
+        host.pop_app_context()
     if choice is None:
         return None
     label = choice.label
