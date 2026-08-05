@@ -1,3 +1,4 @@
+from pathlib import Path
 from BTSpeak import host, dialogs 
 #from __future__ import annotations
 
@@ -1376,7 +1377,7 @@ def request_timeline_choice(
     by_label[back_label] = BACK_CHOICE
     choices.append(dialogs.DynamicMenuItem(title=back_label, action=select))
     try:
-        host.push_app_context("timeline_help")
+        host.push_app_context("timeline_help",help_dir=Path(__file__).parent/"Help"/"Topics"/"en")
         choice = dialogs.dynamic_menu(choices, title,global_keys={"r":menu_reply_author,"b":menu_boost,"v":menu_view_conversation,"p":menu_post_status,"a":menu_reply_all,"l":menu_open_links})
     finally:
         host.pop_app_context()
