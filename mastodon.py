@@ -91,10 +91,17 @@ class MastodonClient:
             raise RuntimeError("Unexpected following response")
         return response
 
-    def home_timeline(self, limit: int = 20, max_id: str | None = None) -> list[dict]:
+    def home_timeline(
+        self,
+        limit: int = 20,
+        max_id: str | None = None,
+        since_id: str | None = None,
+    ) -> list[dict]:
         params = {"limit": limit}
         if max_id:
             params["max_id"] = max_id
+        if since_id:
+            params["since_id"] = since_id
 
         response = self.http.get("/api/v1/timelines/home", params)
         if not isinstance(response, list):

@@ -5,8 +5,10 @@ from BTSpeak import host, dialogs
 import argparse
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field, replace
+from queue import Empty, Queue
 
 from config import ConfigError, load_config, save_config
 from api import ApiError
@@ -28,6 +30,7 @@ from render import (
 BACK_CHOICE = "Back"
 LOAD_NEXT_CHOICE = "Load Next"
 CACHE_TTL_SECONDS = 300
+HOME_TIMELINE_POLL_SECONDS = 60
 MENTION_RE = re.compile(r"(^|\s)@[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.-]+)?\b")
 _main_menu_lists_cache: tuple[float, list[dict]] | None = None
 
@@ -1184,7 +1187,68 @@ def show_home_timeline_menu(
 ) -> None:
     next_max_id = last_status_id(statuses)
     enrich_quoted_statuses(client, statuses)
-    items = [
+    items = home_timeline_choices(statuses, show_numbers, show_usernames)
+    newest_seen_id = first_status_id(statuses)
+    known_status_ids = status_ids(statuses)
+    stop_watcher = threading.Event()
+    new_status_queue: Queue[list[dict]] = Queue()
+    watcher = start_home_timeline_watcher(
+        client,
+        newest_seen_id,
+        limit,
+        known_status_ids,
+        new_status_queue,
+        stop_watcher,
+    )
+
+    try:
+        while True:
+            queued_statuses = queued_home_statuses(new_status_queue, known_status_ids)
+            if queued_statuses:
+                enrich_quoted_statuses(client, queued_statuses)
+                statuses = [*queued_statuses, *statuses]
+                known_status_ids.update(status_ids(queued_statuses))
+                items = home_timeline_choices(statuses, show_numbers, show_usernames)
+                newest_seen_id = first_status_id(statuses)
+
+            choice = request_timeline_choice(
+                items,
+                "Home Timeline",
+                include_load_next=True,
+                load_next_count=limit,
+            )
+            if choice is None:
+                return
+            if choice == LOAD_NEXT_CHOICE:
+                if not next_max_id:
+                    dialogs.showMessage("No more timeline items to load.")
+                    continue
+
+                next_statuses = client.home_timeline(limit, max_id=next_max_id)
+                next_max_id = last_status_id(next_statuses)
+                if not next_statuses:
+                    dialogs.showMessage("No more timeline items to load.")
+                    continue
+
+                enrich_quoted_statuses(client, next_statuses)
+                statuses = next_statuses
+                known_status_ids.update(status_ids(statuses))
+                items = home_timeline_choices(statuses, show_numbers, show_usernames)
+                continue
+
+            open_timeline_choice(client, choice, show_numbers, show_usernames)
+    finally:
+        stop_watcher.set()
+        if watcher is not None:
+            watcher.join(timeout=0.1)
+
+
+def home_timeline_choices(
+    statuses: list[dict],
+    show_numbers: bool,
+    show_usernames: bool,
+) -> list[TimelineChoice]:
+    return [
         timeline_choice_from_status(
             status,
             index,
@@ -1195,40 +1259,94 @@ def show_home_timeline_menu(
         for index, status in enumerate(statuses, 1)
     ]
 
+
+def newer_home_statuses(
+    client: MastodonClient,
+    since_id: str,
+    limit: int,
+    known_status_ids: set[str],
+) -> list[dict]:
+    if not since_id:
+        return []
+
+    statuses = client.home_timeline(limit, since_id=since_id)
+    return [
+        status
+        for status in statuses
+        if status_id(status) and status_id(status) not in known_status_ids
+    ]
+
+
+def queued_home_statuses(
+    new_status_queue: Queue[list[dict]],
+    known_status_ids: set[str],
+) -> list[dict]:
+    queued: list[dict] = []
     while True:
-        choice = request_timeline_choice(
-            items,
-            "Home Timeline",
-            include_load_next=True,
-            load_next_count=limit,
-        )
-        if choice is None:
-            return
-        if choice == LOAD_NEXT_CHOICE:
-            if not next_max_id:
-                dialogs.showMessage("No more timeline items to load.")
-                continue
+        try:
+            statuses = new_status_queue.get_nowait()
+        except Empty:
+            break
+        for status in statuses:
+            current_id = status_id(status)
+            if current_id and current_id not in known_status_ids:
+                queued.append(status)
+                known_status_ids.add(current_id)
+    return queued
 
-            next_statuses = client.home_timeline(limit, max_id=next_max_id)
-            next_max_id = last_status_id(next_statuses)
-            if not next_statuses:
-                dialogs.showMessage("No more timeline items to load.")
-                continue
 
-            enrich_quoted_statuses(client, next_statuses)
-            items = [
-                timeline_choice_from_status(
-                    status,
-                    index,
-                    show_numbers,
-                    show_usernames,
-                    author_is_known_followed=not bool(status.get("reblog")),
-                )
-                for index, status in enumerate(next_statuses, 1)
-            ]
+def start_home_timeline_watcher(
+    client: MastodonClient,
+    since_id: str,
+    limit: int,
+    known_status_ids: set[str],
+    new_status_queue: Queue[list[dict]],
+    stop_watcher: threading.Event,
+) -> threading.Thread | None:
+    if not since_id:
+        return None
+
+    watcher = threading.Thread(
+        target=watch_home_timeline,
+        args=(
+            client,
+            since_id,
+            limit,
+            set(known_status_ids),
+            new_status_queue,
+            stop_watcher,
+        ),
+        daemon=True,
+    )
+    watcher.start()
+    return watcher
+
+
+def watch_home_timeline(
+    client: MastodonClient,
+    since_id: str,
+    limit: int,
+    known_status_ids: set[str],
+    new_status_queue: Queue[list[dict]],
+    stop_watcher: threading.Event,
+) -> None:
+    while not stop_watcher.wait(HOME_TIMELINE_POLL_SECONDS):
+        try:
+            new_statuses = newer_home_statuses(client, since_id, limit, known_status_ids)
+        except Exception:
+            continue
+        if not new_statuses:
             continue
 
-        open_timeline_choice(client, choice, show_numbers, show_usernames)
+        known_status_ids.update(status_ids(new_statuses))
+        since_id = first_status_id(new_statuses) or since_id
+        new_status_queue.put(new_statuses)
+        play_new_home_post_sound()
+
+
+def play_new_home_post_sound() -> None:
+    dialogs.show_message("New Toot.",wait=False)
+    sys.stdout.flush()
 
 
 def show_direct_messages_menu(
@@ -1399,12 +1517,32 @@ def last_page_id(items: list[TimelineChoice]) -> str:
     return ""
 
 
+def first_status_id(statuses: list[dict]) -> str:
+    for status in statuses:
+        current_id = status_id(status)
+        if current_id:
+            return current_id
+    return ""
+
+
 def last_status_id(statuses: list[dict]) -> str:
     for status in reversed(statuses):
-        status_id = str(status.get("id") or "")
-        if status_id:
-            return status_id
+        current_id = status_id(status)
+        if current_id:
+            return current_id
     return ""
+
+
+def status_ids(statuses: list[dict]) -> set[str]:
+    return {
+        current_id
+        for current_id in (status_id(status) for status in statuses)
+        if current_id
+    }
+
+
+def status_id(status: dict) -> str:
+    return str(status.get("id") or "")
 
 
 def open_timeline_choice(
