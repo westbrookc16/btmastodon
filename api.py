@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -27,14 +28,14 @@ class HttpClient:
         self.base_url = normalize_instance_url(instance)
         self.access_token = access_token
 
-    def get(self, path: str, params: dict[str, str | int] | None = None) -> JsonValue:
+    def get(self, path: str, params: Mapping[str, str | int] | None = None) -> JsonValue:
         url = self._url(path, params)
         return self._request("GET", url)
 
     def post(
         self,
         path: str,
-        form: dict[str, str | int | bool] | None = None,
+        form: Mapping[str, str | int | bool] | None = None,
         *,
         access_token: str | None = None,
     ) -> JsonValue:
@@ -46,13 +47,13 @@ class HttpClient:
     def put(
         self,
         path: str,
-        form: dict[str, str | int | bool] | None = None,
+        form: Mapping[str, str | int | bool] | None = None,
     ) -> JsonValue:
         url = self._url(path)
         body = urlencode(form or {}).encode("utf-8")
         return self._request("PUT", url, body=body)
 
-    def _url(self, path: str, params: dict[str, str | int] | None = None) -> str:
+    def _url(self, path: str, params: Mapping[str, str | int] | None = None) -> str:
         url = f"{self.base_url}{path}"
         if params:
             url = f"{url}?{urlencode(params)}"

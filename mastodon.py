@@ -97,7 +97,7 @@ class MastodonClient:
         max_id: str | None = None,
         since_id: str | None = None,
     ) -> list[dict]:
-        params = {"limit": limit}
+        params: dict[str, str | int] = {"limit": limit}
         if max_id:
             params["max_id"] = max_id
         if since_id:
@@ -114,7 +114,7 @@ class MastodonClient:
         limit: int = 20,
         max_id: str | None = None,
     ) -> list[dict]:
-        params = {"limit": limit}
+        params: dict[str, str | int] = {"limit": limit}
         if max_id:
             params["max_id"] = max_id
 
@@ -166,7 +166,7 @@ class MastodonClient:
         limit: int = 20,
         max_id: str | None = None,
     ) -> list[dict]:
-        params = {"limit": limit}
+        params: dict[str, str | int] = {"limit": limit}
         if max_id:
             params["max_id"] = max_id
 
@@ -190,7 +190,7 @@ class MastodonClient:
         return response
 
     def conversations(self, limit: int = 20, max_id: str | None = None) -> list[dict]:
-        params = {"limit": limit}
+        params: dict[str, str | int] = {"limit": limit}
         if max_id:
             params["max_id"] = max_id
 

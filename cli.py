@@ -1,3 +1,11 @@
+"""Command-line and BTSpeak dialog flows for BTMastodon.
+
+This module sits between the Mastodon API wrapper and the BTSpeak UI helpers.
+It converts raw Mastodon response dictionaries into menu choices, handles
+interactive prompts, and dispatches actions such as replying, boosting,
+opening links, reading conversations, and managing lists.
+"""
+
 from pathlib import Path
 from BTSpeak import host, dialogs 
 #from __future__ import annotations
@@ -37,6 +45,14 @@ _main_menu_lists_cache: tuple[float, list[dict]] | None = None
 
 @dataclass(frozen=True)
 class TimelineChoice:
+    """Normalized menu item data for statuses, notifications, and DMs.
+
+    Mastodon responses are shaped differently depending on the endpoint. The
+    UI code uses this small record so timeline menus can offer the same actions
+    without caring whether the item started as a status, notification, or
+    conversation.
+    """
+
     label: str
     links: list[str]
     reply_to_id: str
@@ -80,7 +96,8 @@ def menu_post_status():
 def menu_view_conversation(item):
     timeline_item=item.timeline_choice or None
     if timeline_item==None:
-        dialogs.show_message("Converwsation cannot be viewed.")
+        dialogs.showMessage("Conversation cannot be viewed.")
+        return
     config=load_config()
     client=MastodonClient(config)
     view_conversation(client,timeline_item,show_numbers=config.show_toot_numbers,show_usernames=config.show_toot_usernames)
@@ -96,6 +113,8 @@ def menu_reply_author(item):
     client= MastodonClient(load_config())
     reply_to_toot(client,timeline_item,False)
 def main(argv: list[str] | None = None) -> int:
+    """Run either the interactive menu or a parsed command-line subcommand."""
+
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
         return menu()
@@ -111,6 +130,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the non-interactive command parser.
+
+    The BTSpeak menu calls the same command handlers with ad-hoc namespaces so
+    command-line and menu behavior stay aligned.
+    """
+
     parser = argparse.ArgumentParser(
         prog="btmastodon",
         description="A braille-first Mastodon terminal client.",
@@ -182,6 +207,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def menu() -> int:
+    """Show the main interactive BTSpeak menu."""
+
     while True:
         #print()
         #dialogs.showMessage("""BTMastodon menu
@@ -281,6 +308,12 @@ def prompt_required(label: str) -> str:
 
 
 def main_menu_lists() -> list[dict]:
+    """Return cached Mastodon lists for the main menu.
+
+    Menu rendering should stay quick and should still work when the user is not
+    logged in, so list lookup failures are treated as no available lists.
+    """
+
     global _main_menu_lists_cache
     if _main_menu_lists_cache is not None:
         expires_at, cached_lists = _main_menu_lists_cache
@@ -301,6 +334,8 @@ def invalidate_main_menu_lists_cache() -> None:
 
 
 def list_menu_choices(lists: list[dict]) -> dict[str, dict]:
+    """Map display labels to Mastodon list dictionaries for menu selection."""
+
     choices: dict[str, dict] = {}
     used_labels: set[str] = set()
     for mastodon_list in lists:
@@ -315,7 +350,8 @@ def list_menu_choices(lists: list[dict]) -> dict[str, dict]:
 
 
 def menu_limit() -> int:
-    raw = prompt("Limit 1-40, default 20: ").strip()
+    raw_value = prompt("Limit 1-40, default 20: ")
+    raw = raw_value.strip() if raw_value is not None else ""
     if not raw:
         return 20
     return bounded_limit(raw)
@@ -376,6 +412,8 @@ def whoami(_: argparse.Namespace) -> int:
 
 
 def timeline(args: argparse.Namespace) -> int:
+    """Open the home timeline using the configured account."""
+
     config = load_config()
     client = MastodonClient(config)
     statuses = client.home_timeline(args.limit)
@@ -391,6 +429,8 @@ def timeline(args: argparse.Namespace) -> int:
 
 
 def notifications(args: argparse.Namespace) -> int:
+    """Open the notification timeline."""
+
     config = load_config()
     client = MastodonClient(config)
     items = client.notifications(args.limit)
@@ -409,6 +449,8 @@ def notifications(args: argparse.Namespace) -> int:
 
 
 def direct_messages(args: argparse.Namespace) -> int:
+    """Open Mastodon's conversation-based direct-message view."""
+
     config = load_config()
     client = MastodonClient(config)
     conversations = client.conversations(args.limit)
@@ -441,6 +483,8 @@ def follow_hashtag_command(args: argparse.Namespace) -> int:
 
 
 def search_hashtags_menu() -> int:
+    """Search hashtags interactively and open actions for a selected result."""
+
     config = load_config()
     client = MastodonClient(config)
     query = prompt("Search hashtag: ")
@@ -488,6 +532,8 @@ def open_hashtag_choice(
     show_numbers: bool,
     show_usernames: bool,
 ) -> None:
+    """Offer read/open/follow actions for one hashtag search result."""
+
     name = hashtag_name(hashtag)
     if not name:
         dialogs.showMessage("This hashtag cannot be opened.")
@@ -539,6 +585,8 @@ def create_list(_: argparse.Namespace) -> int:
 
 
 def list_menu(mastodon_list: dict) -> int:
+    """Show actions for a Mastodon list."""
+
     config = load_config()
     client = MastodonClient(config)
     while True:
@@ -581,6 +629,8 @@ def show_list_timeline(
     show_numbers: bool,
     show_usernames: bool,
 ) -> None:
+    """Display one page at a time from a Mastodon list timeline."""
+
     list_id = mastodon_list_id(mastodon_list)
     if not list_id:
         raise RuntimeError("Could not determine list ID")
@@ -632,7 +682,8 @@ def show_list_timeline(
             ]
             continue
 
-        open_timeline_choice(client, choice, show_numbers, show_usernames)
+        if isinstance(choice, TimelineChoice):
+            open_timeline_choice(client, choice, show_numbers, show_usernames)
 
 
 def add_user_to_list(client: MastodonClient, mastodon_list: dict) -> None:
@@ -678,6 +729,8 @@ def set_list_exclusive(
 
 
 def post(args: argparse.Namespace) -> int:
+    """Post a new status, optionally expanding quote and direct-message text."""
+
     client = MastodonClient(load_config())
     status_text = args.status
     quote_status_id = getattr(args, "quote_status_id", None)
@@ -700,6 +753,8 @@ def post(args: argparse.Namespace) -> int:
 
 
 def quote(args: argparse.Namespace) -> int:
+    """Post a quote-style status using the quoted status URL."""
+
     client = MastodonClient(load_config())
     status_text = quote_status_text(client, args.status_id, args.status)
     status_text = ensure_direct_status_recipient(
@@ -724,6 +779,8 @@ def boost(args: argparse.Namespace) -> int:
 
 
 def mention_user(_: argparse.Namespace) -> int:
+    """Compose a status addressed to one or more followed accounts."""
+
     client = MastodonClient(load_config())
     account = client.verify_account()
     account_id = str(account.get("id") or "")
@@ -759,6 +816,8 @@ def mention_user(_: argparse.Namespace) -> int:
 
 
 def prompt_mention_accounts(following: list[dict]) -> list[str]:
+    """Collect one or more account mentions from the user's following list."""
+
     mentions: list[str] = []
     while True:
         mention = prompt_mention_account(following, "Mention User")
@@ -819,6 +878,8 @@ def prompt_followed_account(client: MastodonClient, title: str) -> dict | None:
 
 
 def prompt_account_from_following(following: list[dict], title: str) -> dict | None:
+    """Search followed accounts and return the selected account dictionary."""
+
     search = prompt("Search followed user: ")
     if search is None:
         return None
@@ -965,6 +1026,13 @@ def status_url(status: dict) -> str:
 
 
 def enrich_quoted_statuses(client: MastodonClient, statuses: list[dict]) -> None:
+    """Attach resolved quote-post data when only a quote URL is present.
+
+    Some servers expose quotes as a URL in the status body instead of embedding
+    a quoted status object. This enrichment keeps rendering consistent while
+    allowing failures to fall back to the original status content.
+    """
+
     for status in statuses:
         source = status.get("reblog") or status
         if not isinstance(source, dict):
@@ -994,6 +1062,8 @@ def enrich_quoted_notifications(client: MastodonClient, notifications: list[dict
 
 
 def settings(_: argparse.Namespace) -> int:
+    """Show preference toggles that are stored in the local config file."""
+
     config = load_config()
     choices = ["Toot Numbers", "Toot Usernames", BACK_CHOICE]
     choice = dialogs.request_choice(choices, "Settings")
@@ -1029,6 +1099,8 @@ def timeline_choice_from_status(
     show_usernames: bool = True,
     author_is_known_followed: bool = False,
 ) -> TimelineChoice:
+    """Convert a Mastodon status dictionary into a timeline menu item."""
+
     reply_to_id, reply_to_acct = status_reply_target(status)
     author_id, author_acct = status_author_target(status)
     author_profile_url = status_author_profile_url(status)
@@ -1056,6 +1128,8 @@ def timeline_choice_from_notification(
     index: int,
     show_numbers: bool = True,
 ) -> TimelineChoice:
+    """Convert a notification dictionary into a timeline menu item."""
+
     reply_to_id, reply_to_acct = notification_reply_target(notification)
     author_id, author_acct = notification_author_target(notification)
     author_profile_url = notification_author_profile_url(notification)
@@ -1083,6 +1157,13 @@ def timeline_choice_from_conversation(
     show_numbers: bool = True,
     show_usernames: bool = True,
 ) -> TimelineChoice:
+    """Convert a direct-message conversation into a timeline menu item.
+
+    Mastodon conversations expose participants and a ``last_status``. This
+    keeps replies direct by default and uses conversation participants as the
+    reply-all mention set.
+    """
+
     status = conversation.get("last_status")
     if not isinstance(status, dict):
         participants = conversation_participants(conversation, show_usernames)
@@ -1111,6 +1192,8 @@ def timeline_choice_from_conversation(
 
 
 def conversation_participants(conversation: dict, show_usernames: bool = True) -> str:
+    """Render a comma-separated participant label for a conversation."""
+
     accounts = conversation.get("accounts")
     if not isinstance(accounts, list):
         return ""
@@ -1124,6 +1207,8 @@ def conversation_participants(conversation: dict, show_usernames: bool = True) -
 
 
 def conversation_recipient_acct(conversation: dict) -> str:
+    """Return the first account handle available in a conversation."""
+
     accounts = conversation.get("accounts")
     if not isinstance(accounts, list):
         return ""
@@ -1137,6 +1222,8 @@ def conversation_recipient_acct(conversation: dict) -> str:
 
 
 def status_reply_mentions(status: dict) -> list[str]:
+    """Return author and mentioned accounts that should be included in reply-all."""
+
     source = status.get("reblog") or status
     mentions: list[str] = []
 
@@ -1174,6 +1261,8 @@ def conversation_reply_mentions(conversation: dict) -> list[str]:
 
 
 def add_unique_mention(mentions: list[str], mention: str) -> None:
+    """Append a mention once, comparing case-insensitively."""
+
     if mention and mention.lower() not in {item.lower() for item in mentions}:
         mentions.append(mention)
 
@@ -1185,6 +1274,13 @@ def show_home_timeline_menu(
     show_numbers: bool,
     show_usernames: bool,
 ) -> None:
+    """Show the home timeline and merge in newly polled posts while open.
+
+    A background watcher polls for statuses newer than the first visible item.
+    It communicates with the UI loop through queues so all dialog work stays on
+    the foreground thread.
+    """
+
     next_max_id = last_status_id(statuses)
     enrich_quoted_statuses(client, statuses)
     items = home_timeline_choices(statuses, show_numbers, show_usernames)
@@ -1192,17 +1288,20 @@ def show_home_timeline_menu(
     known_status_ids = status_ids(statuses)
     stop_watcher = threading.Event()
     new_status_queue: Queue[list[dict]] = Queue()
+    ui_message_queue: Queue[str] = Queue()
     watcher = start_home_timeline_watcher(
         client,
         newest_seen_id,
         limit,
         known_status_ids,
         new_status_queue,
+        ui_message_queue,
         stop_watcher,
     )
 
     try:
         while True:
+            show_queued_ui_messages(ui_message_queue)
             queued_statuses = queued_home_statuses(new_status_queue, known_status_ids)
             if queued_statuses:
                 enrich_quoted_statuses(client, queued_statuses)
@@ -1217,6 +1316,14 @@ def show_home_timeline_menu(
                 include_load_next=True,
                 load_next_count=limit,
             )
+            show_queued_ui_messages(ui_message_queue)
+            queued_statuses = queued_home_statuses(new_status_queue, known_status_ids)
+            if queued_statuses:
+                enrich_quoted_statuses(client, queued_statuses)
+                statuses = [*queued_statuses, *statuses]
+                known_status_ids.update(status_ids(queued_statuses))
+                items = home_timeline_choices(statuses, show_numbers, show_usernames)
+
             if choice is None:
                 return
             if choice == LOAD_NEXT_CHOICE:
@@ -1236,7 +1343,8 @@ def show_home_timeline_menu(
                 items = home_timeline_choices(statuses, show_numbers, show_usernames)
                 continue
 
-            open_timeline_choice(client, choice, show_numbers, show_usernames)
+            if isinstance(choice, TimelineChoice):
+                open_timeline_choice(client, choice, show_numbers, show_usernames)
     finally:
         stop_watcher.set()
         if watcher is not None:
@@ -1248,6 +1356,8 @@ def home_timeline_choices(
     show_numbers: bool,
     show_usernames: bool,
 ) -> list[TimelineChoice]:
+    """Build home timeline menu choices with follow-state hints."""
+
     return [
         timeline_choice_from_status(
             status,
@@ -1266,6 +1376,8 @@ def newer_home_statuses(
     limit: int,
     known_status_ids: set[str],
 ) -> list[dict]:
+    """Fetch home statuses newer than ``since_id`` and not already known."""
+
     if not since_id:
         return []
 
@@ -1281,6 +1393,8 @@ def queued_home_statuses(
     new_status_queue: Queue[list[dict]],
     known_status_ids: set[str],
 ) -> list[dict]:
+    """Drain queued watcher results, suppressing duplicate statuses."""
+
     queued: list[dict] = []
     while True:
         try:
@@ -1301,8 +1415,11 @@ def start_home_timeline_watcher(
     limit: int,
     known_status_ids: set[str],
     new_status_queue: Queue[list[dict]],
+    ui_message_queue: Queue[str],
     stop_watcher: threading.Event,
 ) -> threading.Thread | None:
+    """Start the daemon poller used by the home timeline menu."""
+
     if not since_id:
         return None
 
@@ -1314,6 +1431,7 @@ def start_home_timeline_watcher(
             limit,
             set(known_status_ids),
             new_status_queue,
+            ui_message_queue,
             stop_watcher,
         ),
         daemon=True,
@@ -1328,8 +1446,11 @@ def watch_home_timeline(
     limit: int,
     known_status_ids: set[str],
     new_status_queue: Queue[list[dict]],
+    ui_message_queue: Queue[str],
     stop_watcher: threading.Event,
 ) -> None:
+    """Poll the home timeline until ``stop_watcher`` is set."""
+
     while not stop_watcher.wait(HOME_TIMELINE_POLL_SECONDS):
         try:
             new_statuses = newer_home_statuses(client, since_id, limit, known_status_ids)
@@ -1341,12 +1462,27 @@ def watch_home_timeline(
         known_status_ids.update(status_ids(new_statuses))
         since_id = first_status_id(new_statuses) or since_id
         new_status_queue.put(new_statuses)
-        play_new_home_post_sound()
+        queue_new_home_post_message(ui_message_queue)
 
 
-def play_new_home_post_sound() -> None:
-    dialogs.show_message("New Toot.",wait=False)
+def queue_new_home_post_message(ui_message_queue: Queue[str]) -> None:
+    """Notify both stdout and the dialog queue that new posts are available."""
+
+    message = "New Toot."
+    ui_message_queue.put(message)
+    print(message, flush=True)
     sys.stdout.flush()
+
+
+def show_queued_ui_messages(ui_message_queue: Queue[str]) -> None:
+    """Display pending watcher notifications without blocking the menu."""
+
+    while True:
+        try:
+            message = ui_message_queue.get_nowait()
+        except Empty:
+            return
+        dialogs.show_message(message)
 
 
 def show_direct_messages_menu(
@@ -1356,6 +1492,8 @@ def show_direct_messages_menu(
     show_numbers: bool,
     show_usernames: bool,
 ) -> None:
+    """Show direct-message conversations with paginated loading."""
+
     items = [
         timeline_choice_from_conversation(conversation, index, show_numbers, show_usernames)
         for index, conversation in enumerate(conversations, 1)
@@ -1389,7 +1527,8 @@ def show_direct_messages_menu(
             ]
             continue
 
-        open_timeline_choice(client, choice, show_numbers, show_usernames)
+        if isinstance(choice, TimelineChoice):
+            open_timeline_choice(client, choice, show_numbers, show_usernames)
 
 
 def show_hashtag_timeline(
@@ -1399,6 +1538,8 @@ def show_hashtag_timeline(
     show_numbers: bool,
     show_usernames: bool,
 ) -> None:
+    """Show a hashtag timeline with paginated loading."""
+
     statuses = client.hashtag_timeline(hashtag, limit)
     enrich_quoted_statuses(client, statuses)
     items = [
@@ -1433,7 +1574,8 @@ def show_hashtag_timeline(
             ]
             continue
 
-        open_timeline_choice(client, choice, show_numbers, show_usernames)
+        if isinstance(choice, TimelineChoice):
+            open_timeline_choice(client, choice, show_numbers, show_usernames)
 
 
 def show_timeline_menu(
@@ -1443,11 +1585,14 @@ def show_timeline_menu(
     show_numbers: bool = True,
     show_usernames: bool = True,
 ) -> None:
+    """Show a static list of timeline choices and dispatch item actions."""
+
     while True:
         choice = request_timeline_choice(items, title)
         if choice is None:
             return
-        open_timeline_choice(client, choice, show_numbers, show_usernames)
+        if isinstance(choice, TimelineChoice):
+            open_timeline_choice(client, choice, show_numbers, show_usernames)
 
 
 def request_timeline_choice(
@@ -1456,6 +1601,12 @@ def request_timeline_choice(
     include_load_next: bool = False,
     load_next_count: int | None = None,
 ) -> TimelineChoice | str | None:
+    """Request a timeline selection from BTSpeak's dynamic menu.
+
+    Labels are normalized and made unique because the dialog API returns the
+    selected label, not the original Python object.
+    """
+
     if not items and not include_load_next:
         dialogs.showMessage(f"No {title.lower()} to show.")
         return None
@@ -1511,6 +1662,8 @@ def request_timeline_choice(
 
 
 def last_page_id(items: list[TimelineChoice]) -> str:
+    """Return the last pagination ID represented by visible menu items."""
+
     for item in reversed(items):
         if item.page_id:
             return item.page_id
@@ -1518,6 +1671,8 @@ def last_page_id(items: list[TimelineChoice]) -> str:
 
 
 def first_status_id(statuses: list[dict]) -> str:
+    """Return the first non-empty status ID in a page of API results."""
+
     for status in statuses:
         current_id = status_id(status)
         if current_id:
@@ -1526,6 +1681,8 @@ def first_status_id(statuses: list[dict]) -> str:
 
 
 def last_status_id(statuses: list[dict]) -> str:
+    """Return the last non-empty status ID in a page of API results."""
+
     for status in reversed(statuses):
         current_id = status_id(status)
         if current_id:
@@ -1534,6 +1691,8 @@ def last_status_id(statuses: list[dict]) -> str:
 
 
 def status_ids(statuses: list[dict]) -> set[str]:
+    """Return all non-empty status IDs from a page of API results."""
+
     return {
         current_id
         for current_id in (status_id(status) for status in statuses)
@@ -1551,6 +1710,8 @@ def open_timeline_choice(
     show_numbers: bool = True,
     show_usernames: bool = True,
 ) -> None:
+    """Show actions for a selected timeline item and execute the chosen action."""
+
     actions = []
     author_relationship = toot_author_relationship(client, item)
     if item.links:
@@ -1634,6 +1795,8 @@ def open_timeline_links(links: list[str]) -> None:
 
 
 def reply_to_toot(client: MastodonClient, item: TimelineChoice, reply_all: bool = True) -> None:
+    """Prompt for a reply and post it with Mastodon's ``in_reply_to_id``."""
+
     if not item.reply_to_id:
         dialogs.showMessage("This item cannot be replied to.")
         return
@@ -1672,6 +1835,8 @@ def boost_toot(client: MastodonClient, item: TimelineChoice) -> None:
 
 
 def quote_toot(item: TimelineChoice) -> None:
+    """Compose a quote-style status from the selected item's URL."""
+
     if not item.quote_url:
         dialogs.showMessage("This item cannot be quoted.")
         return
@@ -1784,6 +1949,8 @@ def reply_mentions_account(reply: str, mention: str) -> bool:
 
 
 def prepend_missing_mentions(status_text: str, mentions: list[str]) -> str:
+    """Prepend required mentions that the user did not type manually."""
+
     missing = [
         mention
         for mention in mentions
@@ -1800,6 +1967,8 @@ def ensure_direct_status_recipient(
     visibility: str,
     prompt_for_recipient: bool = False,
 ) -> str:
+    """Ensure direct statuses mention at least one recipient."""
+
     if visibility != "direct" or status_has_mention(status_text):
         return status_text
     if not prompt_for_recipient:
@@ -1816,6 +1985,8 @@ def status_has_mention(status_text: str) -> bool:
 
 
 def prompt_direct_recipient(client: MastodonClient) -> str:
+    """Prompt for a followed account to receive a direct status."""
+
     account = client.verify_account()
     account_id = str(account.get("id") or "")
     if not account_id:
@@ -1848,6 +2019,8 @@ def view_conversation(
     show_numbers: bool = True,
     show_usernames: bool = True,
 ) -> None:
+    """Load and display a selected status with its ancestors and descendants."""
+
     if not item.reply_to_id:
         dialogs.showMessage(item.label)
         return
@@ -1889,6 +2062,8 @@ def view_conversation(
 
 
 def context_statuses(context: dict, key: str) -> list[dict]:
+    """Return a typed list of statuses from a Mastodon context response."""
+
     statuses = context.get(key)
     if not isinstance(statuses, list):
         return []
@@ -1896,6 +2071,8 @@ def context_statuses(context: dict, key: str) -> list[dict]:
 
 
 def open_url_in_desktop(url: str) -> None:
+    """Open a URL in BTSpeak desktop mode, or print it outside BTSpeak."""
+
     try:
         from BTSpeak import terminal, web_search
 
@@ -1909,6 +2086,8 @@ def open_url_in_desktop(url: str) -> None:
 
 
 def bounded_limit(raw: str) -> int:
+    """Parse a Mastodon API page size constrained to this app's safe range."""
+
     try:
         value = int(raw)
     except ValueError as exc:

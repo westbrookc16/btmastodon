@@ -43,3 +43,15 @@ btmastodon = "."
 [tool.btcode]
 category = "Other"
 original_name = "btmastodon"
+
+[tool.mypy]
+modules = [
+    "api",
+    "cli",
+    "config",
+    "googleAuth",
+    "mastodon",
+    "render",
+    "__main__",
+]
+ignore_missing_imports = true
