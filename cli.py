@@ -7,16 +7,17 @@ opening links, reading conversations, and managing lists.
 """
 
 from pathlib import Path
-from BTSpeak import host, dialogs 
+from BTSpeak import host, dialogs
 #from __future__ import annotations
 
 import argparse
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from queue import Empty, Queue
 
 from config import ConfigError, load_config, save_config
 from api import ApiError
@@ -39,8 +40,16 @@ BACK_CHOICE = "Back"
 LOAD_NEXT_CHOICE = "Load Next"
 CACHE_TTL_SECONDS = 300
 HOME_TIMELINE_POLL_SECONDS = 60
+NEW_TOOT_SOUND_PATH = Path(__file__).with_name("new_toot.wav")
+NOTIFICATION_SOUND_PATH = Path(__file__).with_name("notification.wav")
 MENTION_RE = re.compile(r"(^|\s)@[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.-]+)?\b")
 _main_menu_lists_cache: tuple[float, list[dict]] | None = None
+_app_home_watcher: threading.Thread | None = None
+_app_home_watcher_stop: threading.Event | None = None
+_app_home_watcher_key: tuple[str, str] | None = None
+_app_notification_watcher: threading.Thread | None = None
+_app_notification_watcher_stop: threading.Event | None = None
+_app_notification_watcher_key: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,8 @@ def menu_reply_author(item):
         return
     client= MastodonClient(load_config())
     reply_to_toot(client,timeline_item,False)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run either the interactive menu or a parsed command-line subcommand."""
 
@@ -209,92 +220,252 @@ def build_parser() -> argparse.ArgumentParser:
 def menu() -> int:
     """Show the main interactive BTSpeak menu."""
 
-    while True:
-        #print()
-        #dialogs.showMessage("""BTMastodon menu
-        #1. Login
-        #2. View home timeline
-        #3. View notifications
-        #4. View logged-in account
-        #5. Post a status
-        #q. Quit""")
-        try:                        
-            lists = main_menu_lists()
-            list_choices = list_menu_choices(lists)
-            choices=[
-                "Login",
-                "Home Timeline",
-                "Notifications",
-                "Direct Messages",
-                "Search Hashtags",
-                *list_choices,
-                "Post Status",
-                "Mention User",
-                "Create List",
-                "Settings",
-                "Quit",
-            ]
-            choice = dialogs.request_choice(choices,"Welcome to Mastodon")
-            if choice==None:
+    try:
+        while True:
+            #print()
+            #dialogs.showMessage("""BTMastodon menu
+            #1. Login
+            #2. View home timeline
+            #3. View notifications
+            #4. View logged-in account
+            #5. Post a status
+            #q. Quit""")
+            try:
+                ensure_app_watchers()
+
+                lists = main_menu_lists()
+                list_choices = list_menu_choices(lists)
+                choices=[
+                    "Login",
+                    "Home Timeline",
+                    "Notifications",
+                    "Direct Messages",
+                    "Search Hashtags",
+                    *list_choices,
+                    "Post Status",
+                    "Mention User",
+                    "Create List",
+                    "Settings",
+                    "Quit",
+                ]
+                choice = dialogs.request_choice(choices, "Welcome to Mastodon")
+                if choice==None:
+                    return 0
+                choice_label = choice.label.strip()
+                choice=choice_label.lower()
+            except EOFError:
+                print("Goodbye.")
                 return 0
-            choice_label = choice.label.strip()
-            choice=choice_label.lower()
-        except EOFError:
-            print("Goodbye.")
-            return 0
 
-        if choice in {"q", "quit", "exit"}:
-            dialogs.showMessage("Goodbye.")
-            return 0
+            if choice in {"q", "quit", "exit"}:
+                dialogs.show_message("Goodbye.",wait=False)
+                return 0
 
-        try:
-            if choice == "login":
-                instance = dialogs.request_input("Instance host, for example mastodon.social: ")
-                login(argparse.Namespace(instance=instance))
-            elif choice == "home timeline":
-                timeline(argparse.Namespace(limit=20))
-            elif choice == "notifications":
-                notifications(argparse.Namespace(limit=20))
-            elif choice == "direct messages":
-                direct_messages(argparse.Namespace(limit=20))
-            elif choice == "search hashtags":
-                search_hashtags_menu()
-            elif choice in {label.lower() for label in list_choices}:
-                selected_list = list_choices[choice_label]
-                list_menu(selected_list)
-            elif choice == "4":
-                whoami(argparse.Namespace())
-            elif choice == "post status":
-                status = prompt("Status text: ")
-                if status!=None:
-                    
-                    visibility = prompt_visibility()
-                    post(
-                        argparse.Namespace(
-                            status=status,
-                            visibility=visibility,
-                            prompt_direct_recipient=True,
-                            in_reply_to_id=None,
-                            quote_status_id=None,
+            try:
+                if choice == "login":
+                    instance = dialogs.request_input("Instance host, for example mastodon.social: ")
+                    login(argparse.Namespace(instance=instance))
+                    restart_app_watchers()
+                elif choice == "home timeline":
+                    timeline(argparse.Namespace(limit=20))
+                elif choice == "notifications":
+                    notifications(argparse.Namespace(limit=20))
+                elif choice == "direct messages":
+                    direct_messages(argparse.Namespace(limit=20))
+                elif choice == "search hashtags":
+                    search_hashtags_menu()
+                elif choice in {label.lower() for label in list_choices}:
+                    selected_list = list_choices[choice_label]
+                    list_menu(selected_list)
+                elif choice == "4":
+                    whoami(argparse.Namespace())
+                elif choice == "post status":
+                    status = prompt("Status text: ")
+                    if status!=None:
+
+                        visibility = prompt_visibility()
+                        post(
+                            argparse.Namespace(
+                                status=status,
+                                visibility=visibility,
+                                prompt_direct_recipient=True,
+                                in_reply_to_id=None,
+                                quote_status_id=None,
+                            )
                         )
-                    )
-            elif choice == "mention user":
-                mention_user(argparse.Namespace())
-            elif choice == "create list":
-                create_list(argparse.Namespace())
-            elif choice == "settings":
-                settings(argparse.Namespace())
-            else:
-                print("Unknown choice.")
-        except EOFError:
-            print("Goodbye.")
-            return 0
-        except (ApiError, ConfigError, RuntimeError, ValueError, argparse.ArgumentTypeError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
+                elif choice == "mention user":
+                    mention_user(argparse.Namespace())
+                elif choice == "create list":
+                    create_list(argparse.Namespace())
+                elif choice == "settings":
+                    settings(argparse.Namespace())
+                else:
+                    print("Unknown choice.")
+            except EOFError:
+                print("Goodbye.")
+                return 0
+            except (ApiError, ConfigError, RuntimeError, ValueError, argparse.ArgumentTypeError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+    finally:
+        stop_app_watchers()
 
 
 def prompt(label: str) -> str | None:
     return dialogs.request_input(label)
+
+
+def configured_account_key(config) -> tuple[str, str]:
+    """Return a stable key for deciding whether the watcher must restart."""
+
+    return (config.instance, config.access_token)
+
+
+def ensure_app_home_watcher(limit: int = 20) -> None:
+    """Start the app-wide home timeline watcher when an account is configured."""
+
+    global _app_home_watcher, _app_home_watcher_key, _app_home_watcher_stop
+
+    try:
+        config = load_config()
+    except ConfigError:
+        return
+    if not config.play_new_toot_sound:
+        stop_app_home_watcher()
+        return
+
+    key = configured_account_key(config)
+    if (
+        _app_home_watcher is not None
+        and _app_home_watcher.is_alive()
+        and _app_home_watcher_key == key
+    ):
+        return
+
+    stop_app_home_watcher()
+    client = MastodonClient(config)
+    try:
+        statuses = client.home_timeline(1)
+    except Exception:
+        return
+
+    since_id = first_status_id(statuses)
+    if not since_id:
+        return
+
+    stop_watcher = threading.Event()
+    watcher = start_home_timeline_watcher(
+        client,
+        since_id,
+        limit,
+        status_ids(statuses),
+        stop_watcher,
+    )
+    if watcher is None:
+        return
+
+    _app_home_watcher = watcher
+    _app_home_watcher_stop = stop_watcher
+    _app_home_watcher_key = key
+
+
+def restart_app_home_watcher() -> None:
+    """Restart the app-wide watcher after account changes."""
+
+    stop_app_home_watcher()
+    ensure_app_home_watcher()
+
+
+def ensure_app_notification_watcher(limit: int = 20) -> None:
+    """Start the app-wide notification watcher when enabled."""
+
+    global _app_notification_watcher, _app_notification_watcher_key, _app_notification_watcher_stop
+
+    try:
+        config = load_config()
+    except ConfigError:
+        return
+    if not config.play_notification_sound:
+        stop_app_notification_watcher()
+        return
+
+    key = configured_account_key(config)
+    if (
+        _app_notification_watcher is not None
+        and _app_notification_watcher.is_alive()
+        and _app_notification_watcher_key == key
+    ):
+        return
+
+    stop_app_notification_watcher()
+    client = MastodonClient(config)
+    try:
+        notifications = client.notifications(1)
+    except Exception:
+        return
+
+    since_id = first_notification_id(notifications)
+    if not since_id:
+        return
+
+    stop_watcher = threading.Event()
+    watcher = start_notification_watcher(
+        client,
+        since_id,
+        limit,
+        notification_ids(notifications),
+        stop_watcher,
+    )
+    if watcher is None:
+        return
+
+    _app_notification_watcher = watcher
+    _app_notification_watcher_stop = stop_watcher
+    _app_notification_watcher_key = key
+
+
+def ensure_app_watchers() -> None:
+    ensure_app_home_watcher()
+    ensure_app_notification_watcher()
+
+
+def restart_app_watchers() -> None:
+    stop_app_watchers()
+    ensure_app_watchers()
+
+
+def stop_app_watchers() -> None:
+    stop_app_home_watcher()
+    stop_app_notification_watcher()
+
+
+def stop_app_notification_watcher() -> None:
+    """Stop the app-wide notification watcher if it is running."""
+
+    global _app_notification_watcher, _app_notification_watcher_key, _app_notification_watcher_stop
+
+    if _app_notification_watcher_stop is not None:
+        _app_notification_watcher_stop.set()
+    if _app_notification_watcher is not None:
+        _app_notification_watcher.join(timeout=0.1)
+
+    _app_notification_watcher = None
+    _app_notification_watcher_stop = None
+    _app_notification_watcher_key = None
+
+
+def stop_app_home_watcher() -> None:
+    """Stop the app-wide watcher if it is running."""
+
+    global _app_home_watcher, _app_home_watcher_key, _app_home_watcher_stop
+
+    if _app_home_watcher_stop is not None:
+        _app_home_watcher_stop.set()
+    if _app_home_watcher is not None:
+        _app_home_watcher.join(timeout=0.1)
+
+    _app_home_watcher = None
+    _app_home_watcher_stop = None
+    _app_home_watcher_key = None
 
 
 def prompt_required(label: str) -> str:
@@ -386,6 +557,32 @@ def prompt_show_toot_usernames(current: bool) -> bool | None:
     if value == BACK_CHOICE.lower():
         return None
     return value == "show usernames"
+
+
+def prompt_play_new_toot_sound(current: bool) -> bool | None:
+    current_label = "On" if current else "Off"
+    choices = ["Play New Toot Sound", "Mute New Toot Sound", BACK_CHOICE]
+    choice = dialogs.request_choice(choices, f"New Toot Sound Currently {current_label}")
+    if choice is None:
+        return None
+
+    value = choice.label.strip().lower()
+    if value == BACK_CHOICE.lower():
+        return None
+    return value == "play new toot sound"
+
+
+def prompt_play_notification_sound(current: bool) -> bool | None:
+    current_label = "On" if current else "Off"
+    choices = ["Play Notification Sound", "Mute Notification Sound", BACK_CHOICE]
+    choice = dialogs.request_choice(choices, f"Notification Sound Currently {current_label}")
+    if choice is None:
+        return None
+
+    value = choice.label.strip().lower()
+    if value == BACK_CHOICE.lower():
+        return None
+    return value == "play notification sound"
 
 
 def login(args: argparse.Namespace) -> int:
@@ -1065,7 +1262,7 @@ def settings(_: argparse.Namespace) -> int:
     """Show preference toggles that are stored in the local config file."""
 
     config = load_config()
-    choices = ["Toot Numbers", "Toot Usernames", BACK_CHOICE]
+    choices = ["Toot Numbers", "Toot Usernames", "New Toot Sound", "Notification Sound", BACK_CHOICE]
     choice = dialogs.request_choice(choices, "Settings")
     if choice is None:
         return 0
@@ -1089,6 +1286,24 @@ def settings(_: argparse.Namespace) -> int:
         save_config(replace(config, show_toot_usernames=show_toot_usernames))
         state = "shown" if show_toot_usernames else "hidden"
         dialogs.showMessage(f"Toot usernames will be {state}.")
+    elif value == "new toot sound":
+        play_new_toot_sound_setting = prompt_play_new_toot_sound(config.play_new_toot_sound)
+        if play_new_toot_sound_setting is None:
+            return 0
+
+        save_config(replace(config, play_new_toot_sound=play_new_toot_sound_setting))
+        restart_app_watchers()
+        state = "played" if play_new_toot_sound_setting else "muted"
+        dialogs.showMessage(f"New toot sound will be {state}.")
+    elif value == "notification sound":
+        play_notification_sound = prompt_play_notification_sound(config.play_notification_sound)
+        if play_notification_sound is None:
+            return 0
+
+        save_config(replace(config, play_notification_sound=play_notification_sound))
+        restart_app_watchers()
+        state = "played" if play_notification_sound else "muted"
+        dialogs.showMessage(f"Notification sound will be {state}.")
     return 0
 
 
@@ -1274,81 +1489,40 @@ def show_home_timeline_menu(
     show_numbers: bool,
     show_usernames: bool,
 ) -> None:
-    """Show the home timeline and merge in newly polled posts while open.
-
-    A background watcher polls for statuses newer than the first visible item.
-    It communicates with the UI loop through queues so all dialog work stays on
-    the foreground thread.
-    """
+    """Show the home timeline without mutating it for background notifications."""
 
     next_max_id = last_status_id(statuses)
     enrich_quoted_statuses(client, statuses)
     items = home_timeline_choices(statuses, show_numbers, show_usernames)
-    newest_seen_id = first_status_id(statuses)
-    known_status_ids = status_ids(statuses)
-    stop_watcher = threading.Event()
-    new_status_queue: Queue[list[dict]] = Queue()
-    ui_message_queue: Queue[str] = Queue()
-    watcher = start_home_timeline_watcher(
-        client,
-        newest_seen_id,
-        limit,
-        known_status_ids,
-        new_status_queue,
-        ui_message_queue,
-        stop_watcher,
-    )
 
-    try:
-        while True:
-            show_queued_ui_messages(ui_message_queue)
-            queued_statuses = queued_home_statuses(new_status_queue, known_status_ids)
-            if queued_statuses:
-                enrich_quoted_statuses(client, queued_statuses)
-                statuses = [*queued_statuses, *statuses]
-                known_status_ids.update(status_ids(queued_statuses))
-                items = home_timeline_choices(statuses, show_numbers, show_usernames)
-                newest_seen_id = first_status_id(statuses)
+    while True:
+        choice = request_timeline_choice(
+            items,
+            "Home Timeline",
+            include_load_next=True,
+            load_next_count=limit,
+        )
 
-            choice = request_timeline_choice(
-                items,
-                "Home Timeline",
-                include_load_next=True,
-                load_next_count=limit,
-            )
-            show_queued_ui_messages(ui_message_queue)
-            queued_statuses = queued_home_statuses(new_status_queue, known_status_ids)
-            if queued_statuses:
-                enrich_quoted_statuses(client, queued_statuses)
-                statuses = [*queued_statuses, *statuses]
-                known_status_ids.update(status_ids(queued_statuses))
-                items = home_timeline_choices(statuses, show_numbers, show_usernames)
-
-            if choice is None:
-                return
-            if choice == LOAD_NEXT_CHOICE:
-                if not next_max_id:
-                    dialogs.showMessage("No more timeline items to load.")
-                    continue
-
-                next_statuses = client.home_timeline(limit, max_id=next_max_id)
-                next_max_id = last_status_id(next_statuses)
-                if not next_statuses:
-                    dialogs.showMessage("No more timeline items to load.")
-                    continue
-
-                enrich_quoted_statuses(client, next_statuses)
-                statuses = next_statuses
-                known_status_ids.update(status_ids(statuses))
-                items = home_timeline_choices(statuses, show_numbers, show_usernames)
+        if choice is None:
+            return
+        if choice == LOAD_NEXT_CHOICE:
+            if not next_max_id:
+                dialogs.showMessage("No more timeline items to load.")
                 continue
 
-            if isinstance(choice, TimelineChoice):
-                open_timeline_choice(client, choice, show_numbers, show_usernames)
-    finally:
-        stop_watcher.set()
-        if watcher is not None:
-            watcher.join(timeout=0.1)
+            next_statuses = client.home_timeline(limit, max_id=next_max_id)
+            next_max_id = last_status_id(next_statuses)
+            if not next_statuses:
+                dialogs.showMessage("No more timeline items to load.")
+                continue
+
+            enrich_quoted_statuses(client, next_statuses)
+            statuses = next_statuses
+            items = home_timeline_choices(statuses, show_numbers, show_usernames)
+            continue
+
+        if isinstance(choice, TimelineChoice):
+            open_timeline_choice(client, choice, show_numbers, show_usernames)
 
 
 def home_timeline_choices(
@@ -1389,36 +1563,14 @@ def newer_home_statuses(
     ]
 
 
-def queued_home_statuses(
-    new_status_queue: Queue[list[dict]],
-    known_status_ids: set[str],
-) -> list[dict]:
-    """Drain queued watcher results, suppressing duplicate statuses."""
-
-    queued: list[dict] = []
-    while True:
-        try:
-            statuses = new_status_queue.get_nowait()
-        except Empty:
-            break
-        for status in statuses:
-            current_id = status_id(status)
-            if current_id and current_id not in known_status_ids:
-                queued.append(status)
-                known_status_ids.add(current_id)
-    return queued
-
-
 def start_home_timeline_watcher(
     client: MastodonClient,
     since_id: str,
     limit: int,
     known_status_ids: set[str],
-    new_status_queue: Queue[list[dict]],
-    ui_message_queue: Queue[str],
     stop_watcher: threading.Event,
 ) -> threading.Thread | None:
-    """Start the daemon poller used by the home timeline menu."""
+    """Start the daemon poller used by the home timeline notification."""
 
     if not since_id:
         return None
@@ -1430,8 +1582,33 @@ def start_home_timeline_watcher(
             since_id,
             limit,
             set(known_status_ids),
-            new_status_queue,
-            ui_message_queue,
+            stop_watcher,
+        ),
+        daemon=True,
+    )
+    watcher.start()
+    return watcher
+
+
+def start_notification_watcher(
+    client: MastodonClient,
+    since_id: str,
+    limit: int,
+    known_notification_ids: set[str],
+    stop_watcher: threading.Event,
+) -> threading.Thread | None:
+    """Start the daemon poller used by the notification sound."""
+
+    if not since_id:
+        return None
+
+    watcher = threading.Thread(
+        target=watch_notifications,
+        args=(
+            client,
+            since_id,
+            limit,
+            set(known_notification_ids),
             stop_watcher,
         ),
         daemon=True,
@@ -1445,11 +1622,9 @@ def watch_home_timeline(
     since_id: str,
     limit: int,
     known_status_ids: set[str],
-    new_status_queue: Queue[list[dict]],
-    ui_message_queue: Queue[str],
     stop_watcher: threading.Event,
 ) -> None:
-    """Poll the home timeline until ``stop_watcher`` is set."""
+    """Poll the home timeline and announce new posts without changing the menu."""
 
     while not stop_watcher.wait(HOME_TIMELINE_POLL_SECONDS):
         try:
@@ -1461,28 +1636,126 @@ def watch_home_timeline(
 
         known_status_ids.update(status_ids(new_statuses))
         since_id = first_status_id(new_statuses) or since_id
-        new_status_queue.put(new_statuses)
-        queue_new_home_post_message(ui_message_queue)
+        play_new_toot_sound()
 
 
-def queue_new_home_post_message(ui_message_queue: Queue[str]) -> None:
-    """Notify both stdout and the dialog queue that new posts are available."""
+def newer_notifications(
+    client: MastodonClient,
+    since_id: str,
+    limit: int,
+    known_notification_ids: set[str],
+) -> list[dict]:
+    """Fetch notifications newer than ``since_id`` and not already known."""
 
-    message = "New Toot."
-    ui_message_queue.put(message)
-    print(message, flush=True)
-    sys.stdout.flush()
+    if not since_id:
+        return []
+
+    notifications = client.notifications(limit, since_id=since_id)
+    return [
+        notification
+        for notification in notifications
+        if notification_id(notification)
+        and notification_id(notification) not in known_notification_ids
+    ]
 
 
-def show_queued_ui_messages(ui_message_queue: Queue[str]) -> None:
-    """Display pending watcher notifications without blocking the menu."""
+def watch_notifications(
+    client: MastodonClient,
+    since_id: str,
+    limit: int,
+    known_notification_ids: set[str],
+    stop_watcher: threading.Event,
+) -> None:
+    """Poll notifications and play the notification sound for new items."""
 
-    while True:
+    while not stop_watcher.wait(HOME_TIMELINE_POLL_SECONDS):
         try:
-            message = ui_message_queue.get_nowait()
-        except Empty:
+            new_notifications = newer_notifications(
+                client,
+                since_id,
+                limit,
+                known_notification_ids,
+            )
+        except Exception:
+            continue
+        if not new_notifications:
+            continue
+
+        known_notification_ids.update(notification_ids(new_notifications))
+        since_id = first_notification_id(new_notifications) or since_id
+        play_notification_sound()
+
+
+def play_new_toot_sound(path: Path = NEW_TOOT_SOUND_PATH) -> None:
+    """Play the new-toot WAV notification without using speech."""
+
+    play_wav_sound(path)
+
+
+def play_notification_sound(path: Path = NOTIFICATION_SOUND_PATH) -> None:
+    """Play the notification WAV alert without using speech."""
+
+    play_wav_sound(path)
+
+
+def play_wav_sound(path: Path) -> None:
+    """Play a WAV notification without using speech."""
+
+    if not path.exists():
+        return
+
+    if play_wav_with_vlc(path):
+        return
+
+    if sys.platform.startswith("win"):
+        try:
+            import winsound
+
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
             return
-        dialogs.show_message(message)
+        except Exception:
+            return
+
+    for command in ("aplay", "paplay", "pw-play"):
+        executable = shutil.which(command)
+        if not executable:
+            continue
+        try:
+            subprocess.Popen(
+                [executable, str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception:
+            continue
+
+
+def play_wav_with_vlc(path: Path) -> bool:
+    """Play a WAV file asynchronously through VLC when it is available."""
+
+    for command in ("cvlc", "vlc"):
+        executable = shutil.which(command)
+        if not executable:
+            continue
+        try:
+            subprocess.Popen(
+                [
+                    executable,
+                    "--intf",
+                    "dummy",
+                    "--play-and-exit",
+                    "--no-video",
+                    "--quiet",
+                    str(path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def show_direct_messages_menu(
@@ -1702,6 +1975,30 @@ def status_ids(statuses: list[dict]) -> set[str]:
 
 def status_id(status: dict) -> str:
     return str(status.get("id") or "")
+
+
+def first_notification_id(notifications: list[dict]) -> str:
+    """Return the first non-empty notification ID in a page of API results."""
+
+    for notification in notifications:
+        current_id = notification_id(notification)
+        if current_id:
+            return current_id
+    return ""
+
+
+def notification_ids(notifications: list[dict]) -> set[str]:
+    """Return all non-empty notification IDs from a page of API results."""
+
+    return {
+        current_id
+        for current_id in (notification_id(notification) for notification in notifications)
+        if current_id
+    }
+
+
+def notification_id(notification: dict) -> str:
+    return str(notification.get("id") or "")
 
 
 def open_timeline_choice(

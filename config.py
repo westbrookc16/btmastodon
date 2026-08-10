@@ -23,6 +23,8 @@ class AccountConfig:
     client: ClientCredentials
     show_toot_numbers: bool = True
     show_toot_usernames: bool = True
+    play_new_toot_sound: bool = True
+    play_notification_sound: bool = True
 
 
 def config_dir() -> Path:
@@ -63,6 +65,8 @@ def load_config(path: Path | None = None) -> AccountConfig:
             show_toot_usernames=bool(
                 raw.get("show_toot_usernames", raw.get("show_toot_accounts", True))
             ),
+            play_new_toot_sound=bool(raw.get("play_new_toot_sound", True)),
+            play_notification_sound=bool(raw.get("play_notification_sound", True)),
         )
     except KeyError as exc:
         raise ConfigError(f"Config file is missing required key: {exc}") from exc
@@ -80,6 +84,8 @@ def save_config(config: AccountConfig, path: Path | None = None) -> Path:
         },
         "show_toot_numbers": config.show_toot_numbers,
         "show_toot_usernames": config.show_toot_usernames,
+        "play_new_toot_sound": config.play_new_toot_sound,
+        "play_notification_sound": config.play_notification_sound,
     }
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path

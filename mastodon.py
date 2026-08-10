@@ -183,8 +183,12 @@ class MastodonClient:
         if response not in ({}, None):
             raise RuntimeError("Unexpected add list account response")
 
-    def notifications(self, limit: int = 20) -> list[dict]:
-        response = self.http.get("/api/v1/notifications", {"limit": limit})
+    def notifications(self, limit: int = 20, since_id: str | None = None) -> list[dict]:
+        params: dict[str, str | int] = {"limit": limit}
+        if since_id:
+            params["since_id"] = since_id
+
+        response = self.http.get("/api/v1/notifications", params)
         if not isinstance(response, list):
             raise RuntimeError("Unexpected notifications response")
         return response
