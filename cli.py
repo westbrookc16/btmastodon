@@ -40,7 +40,7 @@ BACK_CHOICE = "Back"
 LOAD_NEXT_CHOICE = "Load Next"
 CACHE_TTL_SECONDS = 300
 HOME_TIMELINE_POLL_SECONDS = 60
-NEW_TOOT_SOUND_PATH = Path(__file__).with_name("new_toot.wav")
+NEW_TOOT_SOUND_PATH = Path(__file__).with_name("new.ogg")
 NOTIFICATION_SOUND_PATH = Path(__file__).with_name("notification.wav")
 MENTION_RE = re.compile(r"(^|\s)@[A-Za-z0-9_][A-Za-z0-9_.-]*(?:@[A-Za-z0-9.-]+)?\b")
 _main_menu_lists_cache: tuple[float, list[dict]] | None = None
@@ -232,7 +232,7 @@ def menu() -> int:
             #q. Quit""")
             try:
                 ensure_app_watchers()
-
+                
                 lists = main_menu_lists()
                 list_choices = list_menu_choices(lists)
                 choices=[
