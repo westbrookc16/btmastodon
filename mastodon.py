@@ -280,6 +280,12 @@ class MastodonClient:
             raise RuntimeError("Unexpected boost response")
         return response
 
+    def favorite_status(self, status_id: str) -> dict:
+        response = self.http.post(f"/api/v1/statuses/{quote(status_id)}/favourite")
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected favorite response")
+        return response
+
     def account_relationship(self, account_id: str) -> dict:
         response = self.http.get(
             "/api/v1/accounts/relationships",

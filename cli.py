@@ -114,6 +114,13 @@ def menu_boost(item):
     timeline_item=item.timeline_choice
     client=MastodonClient(load_config())
     boost_toot(client,timeline_item)
+def menu_favorite(item):
+    timeline_item = getattr(item, "timeline_choice", None)
+    if timeline_item is None:
+        dialogs.showMessage("This item cannot be favorited.")
+        return
+    client = MastodonClient(load_config())
+    favorite_toot(client, timeline_item)
 def menu_reply_author(item):
     timeline_item = getattr(item, "timeline_choice", None)
     if timeline_item is None:
@@ -1920,7 +1927,7 @@ def request_timeline_choice(
     choices.append(dialogs.DynamicMenuItem(title=back_label, action=select))
     try:
         host.push_app_context("timeline_help",help_dir=Path(__file__).parent/"Help"/"Topics"/"en")
-        choice = dialogs.dynamic_menu(choices, title,global_keys={"r":menu_reply_author,"b":menu_boost,"v":menu_view_conversation,"p":menu_post_status,"a":menu_reply_all,"l":menu_open_links})
+        choice = dialogs.dynamic_menu(choices, title,global_keys={"r":menu_reply_author,"b":menu_boost,"f":menu_favorite,"v":menu_view_conversation,"p":menu_post_status,"a":menu_reply_all,"l":menu_open_links})
     finally:
         host.pop_app_context()
     if choice is None:
@@ -2018,6 +2025,7 @@ def open_timeline_choice(
         actions.append("Reply")
     if item.boost_id:
         actions.append("Boost")
+        actions.append("Favorite")
     if item.quote_id:
         actions.append("Quote")
     if item.author_profile_url:
@@ -2041,6 +2049,8 @@ def open_timeline_choice(
         reply_to_toot(client, item, reply_all=True)
     elif choice == "boost":
         boost_toot(client, item)
+    elif choice == "favorite":
+        favorite_toot(client, item)
     elif choice == "quote":
         quote_toot(item)
     elif choice == "view profile":
@@ -2129,6 +2139,15 @@ def boost_toot(client: MastodonClient, item: TimelineChoice) -> None:
 
     status = client.boost_status(item.boost_id)
     dialogs.showMessage(f"Boosted:\n{render_status(status)}")
+
+
+def favorite_toot(client: MastodonClient, item: TimelineChoice) -> None:
+    if not item.boost_id:
+        dialogs.showMessage("This item cannot be favorited.")
+        return
+
+    status = client.favorite_status(item.boost_id)
+    dialogs.showMessage(f"Favorited:\n{render_status(status)}")
 
 
 def quote_toot(item: TimelineChoice) -> None:
