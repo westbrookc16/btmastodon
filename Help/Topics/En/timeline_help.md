@@ -5,3 +5,5 @@ f=favorite
 l=open links
 r=reply
 v=view conversation
+
+On the home timeline, choose Refresh to reload the newest toots.

@@ -38,6 +38,7 @@ from render import (
 
 BACK_CHOICE = "Back"
 LOAD_NEXT_CHOICE = "Load Next"
+REFRESH_CHOICE = "Refresh"
 CACHE_TTL_SECONDS = 300
 HOME_TIMELINE_POLL_SECONDS = 60
 NEW_TOOT_SOUND_PATH = Path(__file__).with_name("new_toot.mp3")
@@ -1506,12 +1507,21 @@ def show_home_timeline_menu(
         choice = request_timeline_choice(
             items,
             "Home Timeline",
+            include_refresh=True,
             include_load_next=True,
             load_next_count=limit,
         )
 
         if choice is None:
             return
+        if choice == REFRESH_CHOICE:
+            statuses = client.home_timeline(limit)
+            next_max_id = last_status_id(statuses)
+            enrich_quoted_statuses(client, statuses)
+            items = home_timeline_choices(statuses, show_numbers, show_usernames)
+            if not items:
+                dialogs.showMessage("No home timeline items to show.")
+            continue
         if choice == LOAD_NEXT_CHOICE:
             if not next_max_id:
                 dialogs.showMessage("No more timeline items to load.")
@@ -1878,6 +1888,7 @@ def show_timeline_menu(
 def request_timeline_choice(
     items: list[TimelineChoice],
     title: str,
+    include_refresh: bool = False,
     include_load_next: bool = False,
     load_next_count: int | None = None,
 ) -> TimelineChoice | str | None:
@@ -1887,7 +1898,7 @@ def request_timeline_choice(
     selected label, not the original Python object.
     """
 
-    if not items and not include_load_next:
+    if not items and not include_refresh and not include_load_next:
         dialogs.showMessage(f"No {title.lower()} to show.")
         return None
 
@@ -1915,6 +1926,10 @@ def request_timeline_choice(
         menu_item = dialogs.DynamicMenuItem(title=label, action=select)
         menu_item.timeline_choice = item
         choices.append(menu_item)
+    if include_refresh:
+        label = unique_label(REFRESH_CHOICE, used_labels)
+        by_label[label] = REFRESH_CHOICE
+        choices.append(dialogs.DynamicMenuItem(title=label, action=select))
     if include_load_next:
         if load_next_count is None:
             label = unique_label(LOAD_NEXT_CHOICE, used_labels)
@@ -1936,6 +1951,8 @@ def request_timeline_choice(
     selected = by_label.get(label)
     if selected == BACK_CHOICE:
         return None
+    if selected == REFRESH_CHOICE:
+        return REFRESH_CHOICE
     if selected == LOAD_NEXT_CHOICE:
         return LOAD_NEXT_CHOICE
     return selected if isinstance(selected, TimelineChoice) else None
